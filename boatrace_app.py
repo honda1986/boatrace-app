@@ -1,28 +1,29 @@
 """
-🚤 ボートレース予想アプリ v16.1 (1号艇1着・2着3or4号艇・3着全通り版)
+🚤 ボートレース予想アプリ v16.2 (抽出緩和版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（事前データ）
              boatrace.jp（展示ST・直前情報・気象情報・レース結果・場別統計）
 
-v16.1 戦略:
+v16.2 緩和内容 (v16.1 → v16.2):
+ ▸ 1号艇勝率閾値: 6.5 → 6.0
+ ▸ 1-2号艇勝率差: 0.5pt → 0.3pt
+ ▸ 1号艇基礎ST: 0.17以下 → 0.18以下
+ ▸ 1号艇展示ST: 0.16以下 → 0.17以下
+ ▸ 1号艇機力: 33% → 30%
+ ▸ 2号艇基礎ST最速閾値: 0.13 → 0.12 (差しリスク境界)
+ ▸ 2号艇弱判定: (勝率<5.5/ST≥0.17/展示≥0.18) → (勝率<5.8/ST≥0.16/展示≥0.17)
+ ▸ 3号艇候補: 勝率≥5.0 → 勝率≥4.8, ST≤0.18 → ST≤0.19
+ ▸ 4号艇候補: 勝率≥5.5 → 勝率≥5.2, ST≤0.16 → ST≤0.17
+ ▸ 場別1C逃げ率: 48% → 45%
+ ▸ 気象風速: 6m → 7m
+ ▸ 気象波高: 10cm → 12cm
+
+戦略:
  ▸ ターゲット: 1号艇1着、2着=3号艇 or 4号艇、3着=全通り
  ▸ 買い目: 7点
-    1-3-4, 1-3-5, 1-3-6     (3号艇まくり差し/差し2着)
-    1-4-2, 1-4-3, 1-4-5, 1-4-6  (4号艇まくり/まくり差し2着)
+    1-3-4, 1-3-5, 1-3-6
+    1-4-2, 1-4-3, 1-4-5, 1-4-6
    ※ 永久除外規則により 1-3-2 を自動除去
- ▸ 抽出条件:
-    [1号艇条件] 勝率≥6.5, F0, 基礎ST≤0.17, 機力≥33%, 展示ST≤0.16
-    [2号艇条件] 勝率<1号艇(確実に1号艇が優位), 2号艇が2着を持っていかない
-       - 勝率が1号艇より0.5pt以上低い、または
-       - 基礎ST/展示STが遅い(0.17以上)
-    [3or4号艇条件] 少なくとも片方が2着圏内の実力
-       - 3号艇: 勝率≥5.0 かつ 基礎ST≤0.18, または
-       - 4号艇: 勝率≥5.5 かつ 基礎ST≤0.16 (カド強攻位置)
-    [まくり阻止] 3号艇/4号艇が強すぎて1号艇を抜くリスクは除外
-       - 3号艇勝率≥7.0 かつ 展示ST<=1号艇-0.05 は見送り
-       - 4号艇勝率≥7.0 かつ 展示ST<=1号艇-0.05 は見送り
-    [場条件] 1C逃げ率≥48%
-    [気象] 風速<6m, 波高<10cm
 """
 import streamlit as st
 import requests
@@ -629,49 +630,45 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None, venue_stats=Non
     # 抽出条件
     # ━━━━━━━━━━━━━━━━━━━━━━━━
 
-    # ─── [1号艇条件] 1号艇が逃げ切る資格 ───
+    # ─── [1号艇条件] 1号艇が逃げ切る資格（v16.2で緩和） ───
     if r1.get("f_count", 0) >= 1: return None
-    if nr1 < 6.5: return None
-    if r1.get("motor_2ren", 33.0) < 33.0: return None
+    if nr1 < 6.0: return None                                  # 6.5 → 6.0
+    if r1.get("motor_2ren", 33.0) < 30.0: return None          # 33 → 30
 
     base_st1 = r1.get("course_st") if r1.get("course_st", 0) > 0 else r1.get("avg_st", 0.15)
-    if base_st1 > 0.17: return None
+    if base_st1 > 0.18: return None                            # 0.17 → 0.18
 
     ex1 = ex_st_dict.get(1)
     if ex1 is not None:
         if ex1 < 0: return None
-        if ex1 > 0.16: return None
+        if ex1 > 0.17: return None                             # 0.16 → 0.17
 
-    # ─── [2号艇条件] 2号艇が2着を持っていかない ───
-    # 2号艇が1号艇より強いと1号艇が1着を取れない可能性が高い
+    # ─── [2号艇条件] 2号艇が2着を持っていかない（緩和） ───
     if nr2 >= nr1: return None
-    # 2号艇が強すぎる場合(勝率差0.5pt未満)は2着に来やすい→見送り
-    if nr1 - nr2 < 0.5: return None
+    if nr1 - nr2 < 0.3: return None                            # 0.5 → 0.3
 
-    # 2号艇ST条件: 遅い方が2着圏外に沈みやすい
     base_st2 = r2.get("course_st") if r2.get("course_st", 0) > 0 else r2.get("avg_st", 0.15)
     ex2 = ex_st_dict.get(2)
 
-    # 2号艇が速すぎると差し一撃で1号艇を抜かれる or 2着に残る確率が高い
-    if base_st2 < 0.13: return None
+    if base_st2 < 0.12: return None                            # 0.13 → 0.12
     if ex1 is not None and ex2 is not None and ex2 > 0:
-        if ex2 <= ex1 - 0.05: return None  # 2号艇STが0.05以上速い=差しリスク
+        if ex2 <= ex1 - 0.05: return None
 
-    # 2号艇が2着から消える条件: 勝率が相対的に低い or STが遅い
-    c2_weak = (nr2 < 5.5) or (base_st2 >= 0.17) or \
-              (ex2 is not None and ex2 > 0 and ex2 >= 0.18)
+    # 2号艇が2着から消える条件（緩和: 勝率<5.8, ST≥0.16, 展示≥0.17）
+    c2_weak = (nr2 < 5.8) or (base_st2 >= 0.16) or \
+              (ex2 is not None and ex2 > 0 and ex2 >= 0.17)
     if not c2_weak:
-        return None  # 2号艇が順当に2着に来そうなら見送り
+        return None
 
-    # ─── [3or4号艇条件] 少なくとも片方に2着実力 ───
+    # ─── [3or4号艇条件] 少なくとも片方に2着実力（緩和） ───
     base_st3 = r3.get("course_st") if r3.get("course_st", 0) > 0 else r3.get("avg_st", 0.15)
     base_st4 = r4.get("course_st") if r4.get("course_st", 0) > 0 else r4.get("avg_st", 0.15)
 
-    c3_candidate = (nr3 >= 5.0 and base_st3 <= 0.18)
-    c4_candidate = (nr4 >= 5.5 and base_st4 <= 0.16)
+    c3_candidate = (nr3 >= 4.8 and base_st3 <= 0.19)           # 5.0/0.18 → 4.8/0.19
+    c4_candidate = (nr4 >= 5.2 and base_st4 <= 0.17)           # 5.5/0.16 → 5.2/0.17
 
     if not (c3_candidate or c4_candidate):
-        return None  # どちらも2着実力なしは見送り
+        return None
 
     # ─── [まくり阻止] 3号艇/4号艇が強すぎて1号艇を抜くリスク ───
     ex3 = ex_st_dict.get(3)
@@ -687,17 +684,17 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None, venue_stats=Non
     if ex1 is not None and ex4 is not None and ex4 > 0:
         if ex4 <= ex1 - 0.05 and nr4 >= 6.5: return None
 
-    # ─── [場条件] 1C逃げ率 ≥ 48% ───
+    # ─── [場条件] 1C逃げ率（緩和: 48% → 45%） ───
     c1_win = vs.get("1C_win")
-    if c1_win is not None and c1_win < 48.0:
+    if c1_win is not None and c1_win < 45.0:
         return None
 
-    # ─── [気象条件] ───
+    # ─── [気象条件] （緩和: 6m/10cm → 7m/12cm） ───
     if weather:
         ws = weather.get("wind_speed")
         wh = weather.get("wave_height")
-        if ws is not None and ws >= 6.0: return None
-        if wh is not None and wh >= 10: return None
+        if ws is not None and ws >= 7.0: return None
+        if wh is not None and wh >= 12: return None
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━
     # スコア計算
@@ -847,7 +844,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
 
-    st.markdown('<div class="hdr"><span style="font-size:32px">🥇</span><div><h1>BOAT RACE AI</h1><div class="sub">v16.1 ─ 1号艇1着・2着3or4号艇・3着全通り (7点)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🥇</span><div><h1>BOAT RACE AI</h1><div class="sub">v16.2 ─ 抽出緩和版 (1-34-全 7点)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
