@@ -20,10 +20,9 @@ v16.2 緩和内容 (v16.1 → v16.2):
 
 戦略:
  ▸ ターゲット: 1号艇1着、2着=3号艇 or 4号艇、3着=全通り
- ▸ 買い目: 7点
-    1-3-4, 1-3-5, 1-3-6
+ ▸ 買い目: 8点
+    1-3-2, 1-3-4, 1-3-5, 1-3-6
     1-4-2, 1-4-3, 1-4-5, 1-4-6
-   ※ 永久除外規則により 1-3-2 を自動除去
 """
 import streamlit as st
 import requests
@@ -769,12 +768,12 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None, venue_stats=Non
     # ★判定
     stars = "★★★" if score >= 7.0 else ("★★☆" if score >= 4.5 else "★☆☆")
 
-    # ─── 買い目: 1-34-全通り 7点 (1-3-2は永久除外) ───
+    # ─── 買い目: 1-34-全通り 8点 ───
     buy_patterns = [
-        [1,3,4], [1,3,5], [1,3,6],           # 1-3-全 から 1-3-2 を除く
+        [1,3,2], [1,3,4], [1,3,5], [1,3,6],  # 1-3-全
         [1,4,2], [1,4,3], [1,4,5], [1,4,6],  # 1-4-全
     ]
-    pred_str = "1-34-全 (7点)"
+    pred_str = "1-34-全 (8点)"
 
     # ─── 表示用情報 ───
     pred_st_strs = [f"{r['course']}C({r['eff_st']:.2f})" for r in racers]
@@ -844,7 +843,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
 
-    st.markdown('<div class="hdr"><span style="font-size:32px">🥇</span><div><h1>BOAT RACE AI</h1><div class="sub">v16.2 ─ 抽出緩和版 (1-34-全 7点)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🥇</span><div><h1>BOAT RACE AI</h1><div class="sub">v16.2 ─ 抽出緩和版 (1-34-全 8点)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
