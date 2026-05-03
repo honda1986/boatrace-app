@@ -29,6 +29,8 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
+
+# --- AI(LightGBM)用のライブラリを追加 ---
 import lightgbm as lgb
 import numpy as np
 
@@ -156,16 +158,12 @@ COURSE_MAKURI_SASHI_RATE: Dict[str, List[float]] = {
 }
 
 # NEW: コース基礎点 (全国1着率に比例)
-# 1C: 55% → +2.0、2C: 14% → +0.5、3C: 13% → 0、
-# 4C: 11% → -0.5、5C: 6% → -1.0、6C: 2% → -1.5
 COURSE_BASE_POINTS: Dict[int, float] = {
     1: 2.0, 2: 0.5, 3: 0.0, 4: -0.5, 5: -1.0, 6: -1.5,
 }
 
-# 係数: 場別1着率偏差に対する補正の強さ (v16.1:0.15 → v16.2:0.10に緩和)
+# 係数
 VENUE_WIN_RATE_COEF = 0.10
-
-# 係数: 攻めバイアス(差し+まくり+まくり差し)偏差の強さ (控えめ)
 VENUE_ATTACK_COEF = 0.08
 
 
@@ -179,8 +177,7 @@ def venue_course_bonus(venue: str, lane: int) -> float:
 
 
 def venue_attack_bonus(venue: str, lane: int) -> float:
-    """攻めコース(3-6)のまくり+まくり差し率の全国偏差を補正。
-    2Cの差しは1着率(場×コース)に既に反映されるためダブルカウント回避で除外。"""
+    """攻めコース(3-6)のまくり+まくり差し率の全国偏差を補正。"""
     if lane < 3 or venue not in COURSE_MAKURI_RATE:
         return 0.0
     idx = lane - 2
@@ -220,7 +217,7 @@ class Racer:
     win_rate: Optional[float] = None
     avg_st: Optional[float] = None
     settle_st: Optional[float] = None
-    settle_avg_rank: Optional[float] = None  # v17.2: 今節2連率→今節平均順位
+    settle_avg_rank: Optional[float] = None
     motor_2rate: Optional[float] = None
     f_count: int = 0
     exhibit_rank: Optional[int] = None
@@ -241,42 +238,35 @@ def _band(v: Optional[float],
 
 
 def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
-    """全艇共通スコア。内訳をdictで返す。v16.3でバンド細分化。"""
     parts: Dict[str, float] = {}
 
-    # コース基礎点(1着率比例)
     parts["コース基礎"] = COURSE_BASE_POINTS.get(lane, 0.0)
-
     parts["級別"] = {"A1": 2.5, "A2": 1.5, "B1": 0.0, "B2": -1.5}.get(r.cls, 0.0)
     parts["勝率"] = _band(r.win_rate, [
         (6.50, 99, 1.5), (5.50, 6.50, 1.0), (5.00, 5.50, 0.5),
         (4.00, 5.00, -0.5), (0.00, 4.00, -1.2),
     ])
 
-    # v16.3: STバンドを5段階に細分化
     st_val = r.course5_avg_st if r.course5_avg_st is not None else r.avg_st
     att    = 1.0 if r.course5_avg_st is not None else 0.5
     parts["ST"] = att * _band(st_val, [
-        (0.00, 0.14, 2.0),   # 超絶スタート
-        (0.14, 0.16, 1.3),   # 優秀
-        (0.16, 0.18, 0.5),   # 良
-        (0.18, 0.20, -0.3),  # 凡
-        (0.20, 9.99, -1.3),  # 遅い
+        (0.00, 0.14, 2.0),
+        (0.14, 0.16, 1.3),
+        (0.16, 0.18, 0.5),
+        (0.18, 0.20, -0.3),
+        (0.20, 9.99, -1.3),
     ])
 
-    # v17.2: 節2率 → 節平均順位 に変更
-    # 平均順位は1.0(全戦1着)〜6.0(全戦6着)の範囲。低いほど好調
     parts["節平順"] = _band(r.settle_avg_rank, [
-        (0.99, 1.50, 2.0),    # 圧倒的好調 (平均ほぼ1着)
-        (1.50, 2.50, 1.2),    # 好調 (平均2着前後)
-        (2.50, 3.50, 0.3),    # 普通 (全国平均3.5)
-        (3.50, 4.50, -0.5),   # やや不調
-        (4.50, 6.01, -1.5),   # 不調
+        (0.99, 1.50, 2.0),
+        (1.50, 2.50, 1.2),
+        (2.50, 3.50, 0.3),
+        (3.50, 4.50, -0.5),
+        (4.50, 6.01, -1.5),
     ])
 
-    # v16.3: 節ST改善を連続的に評価
     if r.settle_st is not None and r.avg_st is not None:
-        delta = r.avg_st - r.settle_st  # 正 = 改善
+        delta = r.avg_st - r.settle_st
         if delta >= 0.04:    parts["節ST改善"] = 1.5
         elif delta >= 0.02:  parts["節ST改善"] = 1.0
         elif delta >= 0.00:  parts["節ST改善"] = 0.3
@@ -290,7 +280,6 @@ def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
         (0.25, 0.30, -0.3), (0.00, 0.25, -1.2),
     ])
 
-    # v16.3: 展示順位を全6段階で評価
     exhibit_scores = {1: 1.5, 2: 0.8, 3: 0.3, 4: -0.2, 5: -0.6, 6: -1.0}
     parts["展示"] = exhibit_scores.get(r.exhibit_rank, 0.0)
 
@@ -301,7 +290,6 @@ def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     else:
         parts["体重"] = 0.0
 
-    # v16.3: F持ちペナルティを強化
     if r.f_count == 1:   parts["F持ち"] = -1.5
     elif r.f_count >= 2: parts["F持ち"] = -3.0
     else:                parts["F持ち"] = 0.0
@@ -313,18 +301,19 @@ def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts["合計"] = total
     return parts
 
-
 # ============================================================
-# LightGBM AI予測の追加
+# LightGBM AI予測の追加設定
 # ============================================================
 @st.cache_resource
 def load_lgb_model():
     try:
+        # lgb_model.txt が同じフォルダにある前提
         return lgb.Booster(model_file='lgb_model.txt')
     except Exception as e:
         return None
 
 def get_lgb_features(r: Racer, venue: str, lane: int) -> list:
+    """枠番、勝率、平均ST、モーター2連率をAIの特徴量として渡す"""
     return [
         float(lane),
         float(r.win_rate or 0.0),
@@ -332,19 +321,23 @@ def get_lgb_features(r: Racer, venue: str, lane: int) -> list:
         float(r.motor_2rate or 0.0)
     ]
 
+# ============================================================
+# 順位付け (AIスコアをミックスして合算！)
+# ============================================================
 def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
     out = []
-    lgb_model = load_lgb_model()
+    lgb_model = load_lgb_model() # AIモデルの呼び出し
     
     for i, r in enumerate(racers):
         lane = i + 1
         bd = score_boat(r, venue, lane)
         
+        # --- AIスコアの計算 ---
         ai_score = 0.0
         if lgb_model is not None:
             features = get_lgb_features(r, venue, lane)
             ai_pred = lgb_model.predict([features])[0]
-            ai_score = round(ai_pred * 10, 2)
+            ai_score = round(ai_pred * 10, 2) # AI予測値を10倍してスコア化
             bd["AI加点"] = ai_score 
             
         final_score = bd["合計"] + ai_score
@@ -359,24 +352,15 @@ def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
 def make_bets(ranked: List[Dict], strategy: str = "standard",
               odds_map: Optional[Dict[str, float]] = None,
               min_odds: float = 0.0) -> List[str]:
-    """3連単買い目生成。strategyで点数を切替。
-    
-    - 'safe'(2点):     1-{2,3}-{3,2}
-    - 'standard'(4点): 1-{2,3}-{2,3,4}  (従来)
-    - 'wide'(9点):     1-{2,3,4}-{2,3,4,5}
-    
-    odds_map指定時、min_odds未満の買い目を除外。
-    """
+    """3連単買い目生成。"""
     if len(ranked) < 4:
         return []
     lanes = [x["lane"] for x in ranked]
     l1, l2, l3, l4, l5 = lanes[0], lanes[1], lanes[2], lanes[3], lanes[4]
 
     if strategy == "safe":
-        # 2点: 1-2位-3位, 1-3位-2位
         raw = [f"{l1}-{l2}-{l3}", f"{l1}-{l3}-{l2}"]
     elif strategy == "wide":
-        # 9点: 1-{2,3,4}-{2,3,4,5}
         raw = []
         for s in (l2, l3, l4):
             for t in (l2, l3, l4, l5):
@@ -385,7 +369,6 @@ def make_bets(ranked: List[Dict], strategy: str = "standard",
                     if c not in raw:
                         raw.append(c)
     else:
-        # standard (4点): 1-{2,3}-{2,3,4}
         raw = []
         for s in (l2, l3):
             for t in (l2, l3, l4):
@@ -394,7 +377,6 @@ def make_bets(ranked: List[Dict], strategy: str = "standard",
                     if c not in raw:
                         raw.append(c)
 
-    # オッズフィルター
     if odds_map and min_odds > 0:
         raw = [c for c in raw if odds_map.get(c, 0) >= min_odds]
 
@@ -410,7 +392,7 @@ def strategy_label(strategy: str) -> str:
 # ============================================================
 st.set_page_config(page_title="v17.3 全艇スコア解析", layout="centered")
 st.title("🚤 v17.3 全艇スコア解析")
-st.caption("タブ2に対象場マルチセレクト追加で時短")
+st.caption("タブ2に対象場マルチセレクト追加で時短 + LightGBM搭載！")
 
 UCHI   = "https://uchisankaku.sakura.ne.jp"
 BOAT   = "https://www.boatrace.jp/owpc/pc/race"
@@ -437,29 +419,17 @@ def get(url: str) -> Optional[str]:
     except Exception:
         return None
 
-
 def fnum(s: Optional[str]) -> Optional[float]:
     if not s:
         return None
     m = re.search(r"-?\d+\.\d+|-?\d+", s)
     return float(m.group()) if m else None
 
-
 # ============================================================
-# uchisankaku: 開催場一覧
-# ============================================================
-# ============================================================
-# boatrace.jp公式: 開催場一覧 (最優先のソース)
+# boatrace.jp公式: 開催場一覧
 # ============================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def boatrace_venues(date_str: str) -> List[int]:
-    """boatrace.jp公式 https://www.boatrace.jp/owpc/pc/race/index?hd=YYYYMMDD
-    から当該日付に開催される場のjcd一覧を取得。
-    
-    HTMLには各場の raceindex?jcd=XX&hd=YYYYMMDD 形式リンクが含まれており、
-    日付を完全一致させた正規表現で確実に抽出可能。
-    過去・当日・明日すべて対応(過去日も公式サイトはアーカイブ保持)。
-    """
     html = get(f"{BOAT}/index?hd={date_str}")
     if not html:
         return []
@@ -474,38 +444,26 @@ def boatrace_venues(date_str: str) -> List[int]:
                 jcds.add(jcd)
     return sorted(jcds)
 
-
 # ============================================================
 # uchisankaku: 開催場一覧 (フォールバック)
 # ============================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def venues_for_date(d: datetime.date) -> List[Tuple[int, str]]:
-    """指定日の開催場一覧を返す。優先順位:
-       1. boatrace.jp公式 (最も信頼できる、過去〜明日まで対応)
-       2. uchisankaku (当日・明日のみ)
-       3. kyotei.sakura.ne.jp (過去日のみ)
-       
-    全ソースで取得失敗した場合は空リストを返す(全24場フォールバックは撤廃)。
-    """
     today_ = datetime.now().date()
     date_str = d.strftime("%Y%m%d")
 
-    # 1. 公式サイトを最優先
     jcds = boatrace_venues(date_str)
     if jcds:
         return [(j, JCD_NAME[j]) for j in jcds if j in JCD_NAME]
 
-    # 2. uchisankaku (当日・明日)
     if d == today_:
         url = f"{UCHI}/raceindex.php"
     elif d == today_ + timedelta(days=1):
         url = f"{UCHI}/raceindex.php?date=tomorrow"
     else:
-        # 3. kyotei.sakura.ne.jp フォールバック (過去日)
         kjcds = kyotei_venues(date_str)
         if kjcds:
             return [(j, JCD_NAME[j]) for j in kjcds if j in JCD_NAME]
-        # 全ソース失敗時: 空リストを返す (全24場フォールバックは撤廃)
         return []
 
     html = get(url)
@@ -524,34 +482,17 @@ def venues_for_date(d: datetime.date) -> List[Tuple[int, str]]:
     result.sort(key=lambda x: x[0])
     return result
 
-
 # ============================================================
-# uchisankaku: 出走表パーサ
+# boatrace.jp公式: 出走表パーサー
 # ============================================================
-# ============================================================
-# boatrace.jp公式: 出走表パーサー (新方式)
-# ============================================================
-# 公式 racelist ページの構造:
-#   - 各艇の主行 = "枠番号 写真 [登録番号 / 級別 氏名 支部/出身地 年齢/体重]
-#                   F数 L数 平均ST | 全国勝率 全国2率 全国3率 |
-#                   当地勝率 当地2率 当地3率 | モーターNo モーター2率 モーター3率 |
-#                   ボートNo ボート2率 ボート3率"
-#   - 続いて今節成績(初日〜最終日)が3行: 進入コース行 / ST行 / 着順行
-#
-# このパーサーは正規表現ベースで艇ごとの主行を抽出する方式。
-# uchisankakuの不安定なテーブル構造依存をやめ、公式の安定構造に切り替え。
-
 @st.cache_data(ttl=300, show_spinner=False)
 def _fetch_official_racelist_html(jcd: int, rno: int, date_str: str) -> Optional[str]:
     jcd_s = f"{jcd:02d}"
     return get(f"{BOAT}/racelist?rno={rno}&jcd={jcd_s}&hd={date_str}")
 
-
 def _parse_official_racelist(html: str) -> List[Racer]:
-    """boatrace.jp公式 racelist ページから6艇分のRacerを抽出。"""
     soup = BeautifulSoup(html, "html.parser")
 
-    # 出走表テーブルを特定: 「ボートレーサー」と「全国」と「当地」と「モーター」を含むテーブル
     target = None
     for tbl in soup.find_all("table"):
         head = tbl.get_text(" ", strip=True)
@@ -561,8 +502,6 @@ def _parse_official_racelist(html: str) -> List[Racer]:
     if not target:
         return []
 
-    # 各艇の主行を抽出: 「profile?toban=N」リンクを持つ行のみ主行
-    # (今節成績の進入コース/ST/着順の行には profileリンクが無いので確実に除外できる)
     racers: List[Racer] = []
     rows = target.find_all("tr")
 
@@ -572,7 +511,6 @@ def _parse_official_racelist(html: str) -> List[Racer]:
     main_rows: List[Tuple[int, "BeautifulSoup"]] = []
     seen_lanes = set()
     for tr in rows:
-        # 主行は profile?toban=... へのリンクを必ず持つ
         a_test = tr.find("a", href=re.compile(r"profile\?toban=\d+"))
         if not a_test:
             continue
@@ -592,8 +530,6 @@ def _parse_official_racelist(html: str) -> List[Racer]:
 
     main_rows.sort(key=lambda x: x[0])
 
-    # 今節成績の3行(進入コース/ST/着順)を主行の直後から抽出する用に、
-    # テーブル全体のtr配列上での主行のインデックスを取得しておく
     all_trs = list(target.find_all("tr"))
     main_tr_indices: Dict[int, int] = {}
     for lane, tr in main_rows:
@@ -647,12 +583,10 @@ def _parse_official_racelist(html: str) -> List[Racer]:
             except (IndexError, ValueError):
                 pass
 
-        # 今節成績集計: 主行の直後に最大3行(進入コース/ST/着順)
         settle_st: Optional[float] = None
         settle_avg_rank: Optional[float] = None
         idx = main_tr_indices.get(lane)
         if idx is not None and idx + 3 < len(all_trs):
-            cs_tr = all_trs[idx + 1]
             st_tr = all_trs[idx + 2]
             fn_tr = all_trs[idx + 3]
 
@@ -662,13 +596,10 @@ def _parse_official_racelist(html: str) -> List[Racer]:
             st_cells = cells_text(st_tr)
             fn_cells = cells_text(fn_tr)
 
-            # ST行: ".12" 形式 (前ピリオド)、または「F.03」のようなF表記もある
             st_vals: List[float] = []
             for c in st_cells:
-                # 「F.03」「L.05」「K」等の特殊表記は集計から除外
                 if re.search(r"[FLK失]", c):
                     continue
-                # ".12" → 0.12 / "0.12" → 0.12
                 if re.fullmatch(r"\.\d+", c):
                     try:
                         st_vals.append(float("0" + c))
@@ -683,18 +614,12 @@ def _parse_official_racelist(html: str) -> List[Racer]:
             if st_vals:
                 settle_st = round(sum(st_vals) / len(st_vals), 3)
 
-            # v17.2: 着順行から平均順位を算出
-            # 公式サイトは全角数字(１〜６)で表示されるため変換
-            # 失格/欠場/フライング(F0,F1,F2)は集計から除外
             zen_to_han = str.maketrans("１２３４５６", "123456")
             ranks: List[int] = []
             for c in fn_cells:
-                # 全角→半角変換
                 c_norm = c.translate(zen_to_han)
-                # 1〜6の単一数字のみを着順として採用
                 if re.fullmatch(r"[1-6]", c_norm):
                     ranks.append(int(c_norm))
-                # それ以外(F/L/失/妨/転/落/エ等)は除外
 
             if ranks:
                 settle_avg_rank = round(sum(ranks) / len(ranks), 2)
@@ -712,19 +637,13 @@ def _parse_official_racelist(html: str) -> List[Racer]:
 
     return racers
 
-
 def fetch_race(jcd: int, rno: int, date_str: str) -> List[Racer]:
-    """単一レースの出走表を取得。失敗時は空リスト。"""
     html = _fetch_official_racelist_html(jcd, rno, date_str)
     if not html:
         return []
     return _parse_official_racelist(html)
 
-
 def fetch_racelist(jcd: int, date_str: str) -> Dict[int, List[Racer]]:
-    """指定日・指定場の全12Rを公式から取得。
-    Tab2バックテストで使われるため、12回HTTPするが、各レース独立で取得可能。
-    """
     out: Dict[int, List[Racer]] = {}
     for rno in range(1, 13):
         racers = fetch_race(jcd, rno, date_str)
@@ -732,12 +651,8 @@ def fetch_racelist(jcd: int, date_str: str) -> Dict[int, List[Racer]]:
             out[rno] = racers
     return out
 
-
-
-
-
 # ============================================================
-# kyotei.sakura.ne.jp: 1日分の払戻を一括取得
+# kyotei.sakura.ne.jp: 払戻
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_kyotei_day(date_str: str) -> Dict[Tuple[int, int], int]:
@@ -746,7 +661,6 @@ def fetch_kyotei_day(date_str: str) -> Dict[Tuple[int, int], int]:
         return {}
     soup = BeautifulSoup(html, "html.parser")
     payouts: Dict[Tuple[int, int], int] = {}
-    # v16.7: 正規表現に日付を直接埋め込み、他日のレースリンクを誤検出しないように
     pat = re.compile(rf'info-{re.escape(date_str)}-(\d+)-(\d+)\.html')
     for a in soup.find_all("a", href=True):
         if "race.kyotei.club" not in a["href"]:
@@ -772,27 +686,15 @@ def fetch_kyotei_day(date_str: str) -> Dict[Tuple[int, int], int]:
                 break
     return payouts
 
-
 def kyotei_venues(date_str: str) -> List[int]:
-    """kyotei.sakura.ne.jpのkakoページから、その日に実際に開催された場のjcd一覧を返す。
-    
-    v16.6 → v16.7 の修正:
-    - 正規表現に日付(date_str)を直接埋め込み、他日のリンクを誤検出しないようにした
-    - race.kyotei.club ドメインのリンクに限定 (他のリンクと混同しない)
-    
-    例: 2026/04/25のページに前日(2026/04/24)江戸川の結果リンクがあっても、
-        date_str=20260425 と一致しないので除外される。
-    """
     html = get(f"{KYOTEI}/kako-{date_str}.html")
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
-    # 当日(date_str)のレース結果リンクのみマッチ
     pat = re.compile(rf'info-{re.escape(date_str)}-(\d+)-\d+\.html')
     jcds = set()
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        # race.kyotei.club ドメインに限定
         if "race.kyotei.club" not in href:
             continue
         m = pat.search(href)
@@ -802,9 +704,8 @@ def kyotei_venues(date_str: str) -> List[int]:
                 jcds.add(jcd)
     return sorted(jcds)
 
-
 # ============================================================
-# boatrace.jp: 個別レース着順・払戻
+# boatrace.jp: 個別レース着順・払戻・オッズ
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_result(date_str: str, jcd: int, rno: int) -> Optional[Dict]:
@@ -840,18 +741,8 @@ def fetch_result(date_str: str, jcd: int, rno: int) -> Optional[Dict]:
 
     return {"finish": finish, "combo": combo, "payout": pay, "kimarite": kim}
 
-
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
-    """boatrace.jp から3連単オッズを取得。{'1-2-3': 5.6, ...} 形式で返す。
-    
-    boatrace.jpのテーブル構造:
-      - 6つの1着グループ(列)が横並び
-      - 各行に各グループのオッズが1つずつ
-      - 1着グループ内で(2着,3着)の順序は: 2着=残りレーン昇順、各2着内で3着=残りレーン昇順
-      - DOM順(行→列): 行r, 列c のセルは「1着=c+1」グループの第r位の組合せ
-      - Standard順: 1着=1の全20通り → 1着=2の全20通り → ... の順
-    """
     jcd_s = f"{jcd:02d}"
     html = get(f"{BOAT}/odds3t?rno={rno}&jcd={jcd_s}&hd={date_str}")
     if not html:
@@ -861,31 +752,23 @@ def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
     if "発売前" in text or "まだ発売されていません" in text:
         return {}
 
-    # 標準組合せ順 (1着→2着→3着、それぞれ昇順)
     combo_order: List[str] = []
     for a in range(1, 7):
         for b in range(1, 7):
-            if b == a:
-                continue
+            if b == a: continue
             for c in range(1, 7):
-                if c == a or c == b:
-                    continue
+                if c == a or c == b: continue
                 combo_order.append(f"{a}-{b}-{c}")
 
-    # オッズらしいセル(decimal, または2桁以上の整数)を集める
     def collect_odds_cells(tbl) -> List[float]:
         out: List[float] = []
         for td in tbl.find_all("td"):
             txt = td.get_text(strip=True).replace(",", "").replace(" ", "")
-            if not txt:
-                continue
-            # 形式1: X.X (オッズ典型)
+            if not txt: continue
             if re.fullmatch(r"\d+\.\d+", txt):
                 out.append(float(txt))
-            # 形式2: 2桁以上の整数 (高オッズ "2187" 等)
             elif re.fullmatch(r"\d+", txt) and len(txt) >= 2:
                 out.append(float(txt))
-            # 単一数字(1-6)はレーン番号なので無視
         return out
 
     target_cells: List[float] = []
@@ -895,7 +778,6 @@ def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
             target_cells = cells
             break
 
-    # フォールバック: 120ぴったり無い場合、最大数のテーブルを採用
     if not target_cells:
         best_cells: List[float] = []
         for tbl in soup.find_all("table"):
@@ -907,9 +789,6 @@ def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
         else:
             return {}
 
-    # DOM順 → Standard順 マッピング
-    # DOM index = row * 6 + col  (row 0..19, col 0..5)
-    # Standard index = col * 20 + row  (col=1着-1, row=1着内位置)
     odds_dict: Dict[str, float] = {}
     for dom_idx, val in enumerate(target_cells):
         row = dom_idx // 6
@@ -920,19 +799,8 @@ def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
 
     return odds_dict
 
-
-
-# ============================================================
-# boatrace.jp公式: 直前情報(展示タイム)
-# ============================================================
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_exhibit_times(date_str: str, jcd: int, rno: int) -> List[Optional[float]]:
-    """boatrace.jp の直前情報ページから展示タイムを取得。
-    返り値は枠順(1〜6)に対応するList[Optional[float]]。
-    取得失敗時や未発表時は[None]*6を返す。
-    
-    展示タイムは小さいほど速い(典型的に6.6〜6.9秒)。
-    """
     jcd_s = f"{jcd:02d}"
     html = get(f"{BOAT}/beforeinfo?rno={rno}&jcd={jcd_s}&hd={date_str}")
     if not html:
@@ -942,12 +810,7 @@ def fetch_exhibit_times(date_str: str, jcd: int, rno: int) -> List[Optional[floa
     if "情報がありません" in text or "発表前" in text:
         return [None] * 6
 
-    # 展示タイムは選手テーブルの各枠の行に含まれる。
-    # 構造: 体重(52.0kg)の次に展示タイム(6.67) が続くパターン
-    # 全体から「6艇分」の行を順に走査する
     times: List[Optional[float]] = [None] * 6
-
-    # ヘッダー行に "展示" と "タイム" を含むテーブルを探す
     target_table = None
     for tbl in soup.find_all("table"):
         head_text = tbl.get_text(" ", strip=True)
@@ -957,26 +820,18 @@ def fetch_exhibit_times(date_str: str, jcd: int, rno: int) -> List[Optional[floa
     if not target_table:
         return times
 
-    # 各枠の行を抽出。各枠は複数tr (進入/着順等の行) にまたがるため、
-    # 「枠番号(1-6) で始まる tr」を主行として識別
     rows = target_table.find_all("tr")
-    lane_idx = 0  # 0..5
+    lane_idx = 0
     for tr in rows:
         cells = tr.find_all(["td", "th"])
         if not cells:
             continue
         first = cells[0].get_text(strip=True)
-        # 枠番号セル (1〜6) で始まる行が主行
         if first in ("1", "2", "3", "4", "5", "6") and lane_idx < 6:
             lane = int(first) - 1
-            # 主行のテキストから X.XX 形式の数値を抽出
             row_text = tr.get_text(" ", strip=True)
-            # 体重: "XX.Xkg" → 除外したい
-            # 展示タイム: 6.50〜7.50 程度の範囲の数値
             for m in re.finditer(r"\b(\d+\.\d+)\b", row_text):
                 v = float(m.group(1))
-                # 体重(40〜60kg台)とチルト(-0.5〜+3.0)を除外し、
-                # 展示タイムらしい範囲(5.50〜8.50)の値を採用
                 if 5.50 <= v <= 8.50:
                     times[lane] = v
                     break
@@ -984,20 +839,15 @@ def fetch_exhibit_times(date_str: str, jcd: int, rno: int) -> List[Optional[floa
 
     return times
 
-
 def assign_exhibit_ranks(times: List[Optional[float]]) -> List[Optional[int]]:
-    """展示タイム配列から各枠の順位(1〜6)を返す。Noneは順位もNone。"""
     valid = [(i, t) for i, t in enumerate(times) if t is not None]
     if len(valid) < 2:
         return [None] * 6
-    # 小さいほど速い → 昇順
     sorted_pairs = sorted(valid, key=lambda x: x[1])
     ranks: List[Optional[int]] = [None] * 6
     for rank, (i, _) in enumerate(sorted_pairs, start=1):
         ranks[i] = rank
     return ranks
-
-
 
 # ============================================================
 # 場傾向の表示ヘルパー
@@ -1024,17 +874,12 @@ def render_venue_summary(venue: str):
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-
 # ============================================================
 # UI
 # ============================================================
 today = datetime.now().date()
 tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 期間バックテスト/当日スキャン"])
 
-
-# ──────────────────────────────────────────────────────────
-# TAB 1
-# ──────────────────────────────────────────────────────────
 with tab1:
     c1, c2 = st.columns([3, 1])
     with c1:
@@ -1063,7 +908,6 @@ with tab1:
         rno   = st.selectbox("レース", list(range(1, 13)),
                              format_func=lambda r: f"{r}R", key="t1_rno")
 
-        # NEW: 戦略プリセット
         sc1, sc2 = st.columns([2, 3])
         with sc1:
             t1_strategy = st.radio(
@@ -1092,7 +936,6 @@ with tab1:
             if not racers or len(racers) < 6:
                 st.error("選手データを取得できませんでした。時間をおいて再試行してください。")
             else:
-                # v16.9: 展示タイムを取得して順位を付与
                 exhibit_times: List[Optional[float]] = [None] * 6
                 exhibit_loaded = False
                 if t1_date <= today + timedelta(days=1):
@@ -1105,9 +948,8 @@ with tab1:
 
                 ranked = rank_all(racers, vname)
 
-                # オッズ取得(未発走でも発売中なら取得可)
                 odds_map: Dict[str, float] = {}
-                if t1_date >= today:  # 当日/明日のみ取得試行
+                if t1_date >= today:
                     with st.spinner("オッズ取得中..."):
                         odds_map = fetch_odds_3t(dstr, jcd, rno)
 
@@ -1126,7 +968,6 @@ with tab1:
                            + (" / オッズ取得成功" if odds_map else "")
                            + (" / 展示適用" if exhibit_loaded else " / 展示未発表"))
 
-                # スコア差(信頼度)表示 — 1-2位 / 2-3位 / 3-4位
                 if len(ranked) >= 4:
                     m12 = ranked[0]["score"] - ranked[1]["score"]
                     m23 = ranked[1]["score"] - ranked[2]["score"]
@@ -1145,16 +986,12 @@ with tab1:
                     win_r = f"{r.win_rate:.2f}" if r.win_rate is not None else "-"
                     c_st  = f"{r.avg_st:.2f}" if r.avg_st is not None else "-"
                     m2_r  = f"{r.motor_2rate*100:.0f}" if r.motor_2rate is not None else "-"
-                    # v17.2: 節2率 → 節平順
                     sar_r = f"{r.settle_avg_rank:.1f}" if r.settle_avg_rank is not None else "-"
-                    # 今節ST
                     sst_r = f"{r.settle_st:.2f}" if r.settle_st is not None else "-"
-                    # 展示タイム & 順位
                     lane_idx = x["lane"] - 1
                     ex_time = exhibit_times[lane_idx]
                     ex_rank = r.exhibit_rank
-                    ex_str = (f"{ex_time:.2f}({ex_rank})" if ex_time is not None and ex_rank
-                              else "-")
+                    ex_str = (f"{ex_time:.2f}({ex_rank})" if ex_time is not None and ex_rank else "-")
                     venue_total = bd["コース基礎"] + bd["場×コース"] + bd["場×攻め"]
                     df_rows.append({
                         "順位": rk,
@@ -1178,9 +1015,9 @@ with tab1:
                     for rk, x in enumerate(ranked[:3], 1):
                         row = {"順位": rk, "艇": x["lane"], "名前": x["racer"].name}
                         for k, v in x["breakdown"].items():
-                            if k == "合計":
+                            if k == "合計" or k == "総合計(AI込)":
                                 continue
-                            row[k] = f"{v:+.2f}"
+                            row[k] = f"{v:+.2f}" if isinstance(v, float) else v
                         row["合計"] = f"{x['score']:+.2f}"
                         br_rows.append(row)
                     st.dataframe(pd.DataFrame(br_rows), use_container_width=True, hide_index=True)
@@ -1194,7 +1031,6 @@ with tab1:
                         )
                     )
 
-                    # オッズ表示付きの買い目テーブル
                     if odds_map:
                         bet_rows = []
                         total_inv = len(bets) * 100
@@ -1209,7 +1045,6 @@ with tab1:
                             })
                         st.dataframe(pd.DataFrame(bet_rows),
                                      use_container_width=True, hide_index=True)
-                        # 平均オッズ
                         valid_odds = [o for o in odds_values if o > 0]
                         if valid_odds:
                             avg_o = sum(valid_odds) / len(valid_odds)
@@ -1262,10 +1097,6 @@ with tab1:
                     f"[結果]({BOAT}/raceresult?rno={rno}&jcd={jcd_s}&hd={dstr})"
                 )
 
-
-# ──────────────────────────────────────────────────────────
-# TAB 2: 期間バックテスト + 当日スキャン
-# ──────────────────────────────────────────────────────────
 with tab2:
     st.subheader("📊 期間バックテスト / 当日スキャン")
     st.caption("予想1位が1号艇のレースを抽出。過去日は結果取得、当日は予想のみ。")
@@ -1286,9 +1117,6 @@ with tab2:
             key="bt_e",
         )
 
-    # v17.3: 開催場を絞り込めるマルチセレクト
-    # 公式パーサー(v17系)は1日24場×12R=最大288リクエストとなり時間がかかるため、
-    # 場を絞ることで処理時間を大幅に短縮できる
     all_venue_names = [JCD_NAME[j] for j in sorted(JCD_NAME.keys())]
     bt_venues = st.multiselect(
         "対象場 (空=全場)",
@@ -1307,7 +1135,6 @@ with tab2:
         st.caption("⚠️ 全場対象 (推定最大288リクエスト/日)。"
                    "時間がかかる場合は対象場を絞ってください")
 
-    # NEW: 戦略プリセット
     bt_strategy = st.radio(
         "戦略", ["safe", "standard", "wide"],
         index=1,
@@ -1316,7 +1143,6 @@ with tab2:
         key="bt_strategy",
     )
 
-    # NEW: 品質ゲート
     with st.expander("🔧 品質フィルター (デフォルト推奨)", expanded=True):
         qc1, qc2 = st.columns(2)
         with qc1:
@@ -1339,7 +1165,6 @@ with tab2:
                  "Nレース×1リクエスト追加で時間がかかる。当日朝など展示前は意味なし。",
         )
 
-    # スコア差フィルター (1-2位 / 2-3位 / 3-4位)
     st.markdown("**スコア差フィルター** (各順位の差で信頼度を厳格化)")
     mc1, mc2, mc3 = st.columns(3)
     with mc1:
@@ -1414,10 +1239,8 @@ with tab2:
                     venue_bt = JCD_NAME.get(jcd_bt, "")
                     if not venue_bt:
                         continue
-                    # v17.3: ユーザー指定の対象場フィルター
                     if bt_target_jcds is not None and jcd_bt not in bt_target_jcds:
                         continue
-                    # 荒れ水面スキップ
                     if bt_skip_hard and venue_bt in hard_venues:
                         continue
                     status.caption(f"📡 {dstr_bt} {venue_bt} — 選手データ取得中...")
@@ -1429,7 +1252,6 @@ with tab2:
                         if len(racers_bt) < 6:
                             continue
 
-                        # v16.9: 展示タイム反映 (チェックボックスON時のみ)
                         if bt_use_exhibit:
                             ex_times = fetch_exhibit_times(dstr_bt, jcd_bt, rno_bt)
                             ex_ranks = assign_exhibit_ranks(ex_times)
@@ -1440,14 +1262,12 @@ with tab2:
                         if ranked_bt[0]["lane"] != 1:
                             continue
 
-                        # 品質ゲート: 1号艇の選手を取得
                         ichi = racers_bt[0]
                         if bt_skip_b2 and ichi.cls == "B2":
                             continue
                         if ichi.win_rate is not None and ichi.win_rate < bt_min_winrate:
                             continue
 
-                        # スコア差フィルター (1-2 / 2-3 / 3-4)
                         margin_12 = ranked_bt[0]["score"] - ranked_bt[1]["score"]
                         margin_23 = ranked_bt[1]["score"] - ranked_bt[2]["score"]
                         margin_34 = ranked_bt[2]["score"] - ranked_bt[3]["score"]
@@ -1462,7 +1282,6 @@ with tab2:
                         top_score = ranked_bt[0]["score"]
                         inv_bt    = len(bets_bt) * 100
 
-                        # 当日: 未発走として記録
                         if not is_past:
                             matches.append({
                                 "日付": dstr_bt, "場": venue_bt, "R": rno_bt,
@@ -1545,7 +1364,6 @@ with tab2:
                           delta_color="normal" if rr >= 100 else "inverse")
                 cd.metric("投資/回収", f"¥{inv:,} / ¥{ret:,}")
 
-                # 場別内訳
                 if n_resv > 0:
                     st.markdown("### 🗺️ 場別内訳（結果確定分）")
                     venue_stats: Dict[str, Dict] = {}
@@ -1615,3 +1433,4 @@ with tab2:
                     })
                 st.dataframe(pd.DataFrame(rows_disp),
                              use_container_width=True, hide_index=True)
+
