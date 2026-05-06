@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.9 全艇スコア解析アプリ（タブ3削除 ＆ 枠番固定加点廃止スッキリ版）
+v17.10 全艇スコア解析アプリ（節間成績取得追加 ＆ タブ1フルデータ表示版）
 """
 
 import re
@@ -28,7 +28,6 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 req_session = requests.Session()
 req_session.headers.update(UA)
 
-# 通信の通り道を20本に拡張（15並列でも渋滞させない）
 adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=3)
 req_session.mount('https://', adapter)
 req_session.mount('http://', adapter)
@@ -105,20 +104,23 @@ def _band(v: Optional[float], bands: List[Tuple[float, float, float]], default: 
 def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts: Dict[str, float] = {}
 
-    # AIが枠番を評価するため、コース基礎（固定加点）は廃止
-
+    # 節間成績（今回からしっかり読み込まれます）
     parts["節平順"] = _band(r.settle_avg_rank, [(0.99, 1.50, 2.0), (1.50, 2.50, 1.2), (2.50, 3.50, 0.3), (3.50, 4.50, -0.5), (4.50, 6.01, -1.5)])
+    
+    # 普段のSTと今節のSTの比較で「スタートが見えているか」を評価
     if r.settle_st is not None and r.avg_st is not None:
         delta = r.avg_st - r.settle_st
         if delta >= 0.02: parts["節ST改善"] = 1.0
         elif delta <= -0.02: parts["節ST改善"] = -1.0
         else: parts["節ST改善"] = 0.0
+    else:
+        parts["節ST改善"] = 0.0
     
     exhibit_scores = {1: 1.5, 2: 0.8, 3: 0.3, 4: -0.2, 5: -0.6, 6: -1.0}
     parts["展示"] = exhibit_scores.get(r.exhibit_rank, 0.0)
+    
     if r.f_count >= 1: parts["F持ち"] = -1.5 * r.f_count
     
-    # 全国の平均と比べた際の「その場特有の」有利不利だけは残す
     parts["場×コース"] = venue_course_bonus(venue, lane)
     parts["場×攻め"]   = venue_attack_bonus(venue, lane)
 
@@ -183,7 +185,7 @@ def strategy_label(strategy: str) -> str:
     return {"safe": "安全2点", "standard": "標準4点", "wide": "拡張9点"}.get(strategy, strategy)
 
 # ============================================================
-# スクレイピング関数群（超・高速版 ＆ バグ修正版）
+# スクレイピング関数群（超・高速版 ＆ 節間データ取得対応版）
 # ============================================================
 def get_html(url: str) -> Optional[str]:
     try:
@@ -231,8 +233,34 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
                 win_rate, avg_st, motor = 0.0, 0.17, 0.0
         else:
             win_rate, avg_st, motor = 0.0, 0.17, 0.0
+
+        # ★追加：今節の着順とSTを取得して平均を計算する
+        ranks = []
+        sts = []
+        for td in cells:
+            a_tag = td.find("a")
+            if a_tag and "raceresult" in a_tag.get("href", ""):
+                rank_txt = a_tag.get_text(strip=True)
+                if rank_txt in ["1","2","3","4","5","6","１","２","３","４","５","６"]:
+                    ranks.append(int(rank_txt.translate(str.maketrans('１２３４５６', '123456'))))
             
-        racers.append(Racer(name=f"艇{lane}", win_rate=win_rate, avg_st=avg_st, motor_2rate=motor, f_count=f_count))
+            parts = td.get_text(separator=" ", strip=True).split()
+            for p in parts:
+                if re.match(r"^\.\d{2}$", p):
+                    sts.append(float(p))
+                    
+        settle_avg_rank = sum(ranks)/len(ranks) if ranks else None
+        settle_st = sum(sts)/len(sts) if sts else None
+            
+        racers.append(Racer(
+            name=f"艇{lane}", 
+            win_rate=win_rate, 
+            avg_st=avg_st, 
+            motor_2rate=motor, 
+            f_count=f_count,
+            settle_avg_rank=settle_avg_rank,
+            settle_st=settle_st
+        ))
     return racers if len(racers)==6 else None
 
 @st.cache_data(ttl=3600)
@@ -282,9 +310,9 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.9 超・爆速解析", layout="wide")
-st.title("🚤 v17.9 全艇スコア解析")
-st.caption("AI一本化ロジック ＆ バックテスト 超・爆速15並列エンジン搭載")
+st.set_page_config(page_title="v17.10 超・爆速解析", layout="wide")
+st.title("🚤 v17.10 全艇スコア解析")
+st.caption("AI一本化 ＆ フルデータ開示 ＆ 超・爆速15並列エンジン搭載")
 
 # タブを2つだけにする
 tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 バックテスト"])
@@ -311,16 +339,36 @@ with tab1:
             
             st.success("解析完了！")
             
+            # ★変更：算出の元になった数値とスコアを全て表示
             df_disp = []
             for item in ranked:
+                racer = item["racer"]
+                bd = item["breakdown"]
+                
                 df_disp.append({
                     "予想順": len(df_disp) + 1,
                     "枠": item["lane"],
                     "総合スコア": item["score"],
-                    "AI加点": item["breakdown"].get("AI加点", 0.0),
-                    "勝率": round(item["racer"].win_rate, 2),
-                    "場×コース": item["breakdown"].get("場×コース", 0.0)
+                    
+                    # --- AI関連 ---
+                    "AI加点": bd.get("AI加点", 0.0),
+                    
+                    # --- 元データ（選手の実績） ---
+                    "勝率": round(racer.win_rate, 2) if racer.win_rate else 0.0,
+                    "平均ST": round(racer.avg_st, 2) if racer.avg_st else 0.0,
+                    "モーター": round(racer.motor_2rate, 2) if racer.motor_2rate else 0.0,
+                    "節平均順位": round(racer.settle_avg_rank, 2) if racer.settle_avg_rank else "-",
+                    "節平均ST": round(racer.settle_st, 2) if racer.settle_st else "-",
+                    "F数": racer.f_count,
+                    
+                    # --- アプリの基礎スコア内訳 ---
+                    "節平順(点)": bd.get("節平順", 0.0),
+                    "ST改善(点)": bd.get("節ST改善", 0.0),
+                    "F持ち(点)": bd.get("F持ち", 0.0),
+                    "場×コース(点)": bd.get("場×コース", 0.0),
+                    "場×攻め(点)": bd.get("場×攻め", 0.0)
                 })
+            
             st.dataframe(pd.DataFrame(df_disp), use_container_width=True)
             
             st.subheader("💡 おすすめ買い目")
@@ -419,4 +467,3 @@ with tab2:
             st.dataframe(df_bt[disp_cols], use_container_width=True)
         else:
             st.warning("解析できるレースがありませんでした（中止または発売前）。")
-
