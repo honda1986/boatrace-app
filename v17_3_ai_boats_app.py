@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.8 全艇スコア解析アプリ（データ読み取りバグ修正 ＆ 超・爆速フル機能版）
+v17.9 全艇スコア解析アプリ（タブ3削除 ＆ 枠番固定加点廃止スッキリ版）
 """
 
 import re
@@ -72,8 +72,6 @@ COURSE_WIN_RATE: Dict[str, List[float]] = {
     "大村":   [61.3, 12.1, 11.3,  9.6, 5.0, 1.3],
 }
 
-COURSE_BASE_POINTS: Dict[int, float] = {1: 2.0, 2: 0.5, 3: 0.0, 4: -0.5, 5: -1.0, 6: -1.5}
-
 def venue_course_bonus(v: str, l: int) -> float:
     if v not in COURSE_WIN_RATE: return 0.0
     return round((COURSE_WIN_RATE[v][l-1] - COURSE_WIN_RATE["全国"][l-1]) * 0.1, 2)
@@ -106,7 +104,8 @@ def _band(v: Optional[float], bands: List[Tuple[float, float, float]], default: 
 
 def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts: Dict[str, float] = {}
-    parts["コース基礎"] = COURSE_BASE_POINTS.get(lane, 0.0)
+
+    # AIが枠番を評価するため、コース基礎（固定加点）は廃止
 
     parts["節平順"] = _band(r.settle_avg_rank, [(0.99, 1.50, 2.0), (1.50, 2.50, 1.2), (2.50, 3.50, 0.3), (3.50, 4.50, -0.5), (4.50, 6.01, -1.5)])
     if r.settle_st is not None and r.avg_st is not None:
@@ -119,6 +118,7 @@ def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts["展示"] = exhibit_scores.get(r.exhibit_rank, 0.0)
     if r.f_count >= 1: parts["F持ち"] = -1.5 * r.f_count
     
+    # 全国の平均と比べた際の「その場特有の」有利不利だけは残す
     parts["場×コース"] = venue_course_bonus(venue, lane)
     parts["場×攻め"]   = venue_attack_bonus(venue, lane)
 
@@ -216,11 +216,9 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
         lane = lane_map[cells[0].get_text(strip=True)]
         text = tb.get_text(" ", strip=True)
         
-        # F数の取得
         m_f = re.search(r"F\s*(\d+)", text)
         f_count = int(m_f.group(1)) if m_f else 0
         
-        # ★大修正：勝率・ST・モーターは「F L」の文字の後ろから確実に拾う！
         m_fl = re.search(r"F\s*\d+\s+L\s*\d+", text)
         if m_fl:
             nums = re.findall(r"-?\d+\.\d+|\d+", text[m_fl.end():])
@@ -284,11 +282,12 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.8 超・爆速解析", layout="wide")
-st.title("🚤 v17.8 全艇スコア解析")
-st.caption("AI一本化ロジック ＆ バックテスト/データ収集 超・爆速15並列エンジン搭載")
+st.set_page_config(page_title="v17.9 超・爆速解析", layout="wide")
+st.title("🚤 v17.9 全艇スコア解析")
+st.caption("AI一本化ロジック ＆ バックテスト 超・爆速15並列エンジン搭載")
 
-tab1, tab2, tab3 = st.tabs(["🔍 1レース解析", "📊 バックテスト", "🤖 AIデータ収集"])
+# タブを2つだけにする
+tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 バックテスト"])
 
 # ----------------------------------------------------
 # タブ1: 1レース解析
@@ -319,8 +318,7 @@ with tab1:
                     "枠": item["lane"],
                     "総合スコア": item["score"],
                     "AI加点": item["breakdown"].get("AI加点", 0.0),
-                    "勝率": round(item["racer"].win_rate, 2), # 確認用に追加
-                    "コース基礎": item["breakdown"].get("コース基礎", 0.0),
+                    "勝率": round(item["racer"].win_rate, 2),
                     "場×コース": item["breakdown"].get("場×コース", 0.0)
                 })
             st.dataframe(pd.DataFrame(df_disp), use_container_width=True)
@@ -422,51 +420,3 @@ with tab2:
         else:
             st.warning("解析できるレースがありませんでした（中止または発売前）。")
 
-# ----------------------------------------------------
-# タブ3: AIデータ収集（超・爆速版）
-# ----------------------------------------------------
-with tab3:
-    st.subheader("🤖 AI学習データ（CSV）超・爆速収集")
-    st.warning("⚠️ 15並列で実行します。")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        ai_s = st.date_input("収集開始日", value=datetime.now(JST).date() - timedelta(days=2))
-    with col2:
-        ai_e = st.date_input("収集終了日", value=datetime.now(JST).date() - timedelta(days=1))
-    
-    if st.button("🚀 超・爆速収集を開始", type="primary", use_container_width=True):
-        days = [(ai_s + timedelta(days=i)).strftime("%Y%m%d") for i in range((ai_e - ai_s).days + 1)]
-        all_data = []
-        prog = st.progress(0.0)
-        
-        for idx, dstr in enumerate(days):
-            jcds = boatrace_venues(dstr)
-            if not jcds: continue
-            
-            tasks = [(j, r, dstr) for j in jcds for r in range(1, 13)]
-            st.write(f"📅 {dstr}: 全 {len(tasks)} レースを15人体制で取得中...")
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-                res_futures = {executor.submit(fetch_result_and_payoff, j, r, dstr): (j, r) for j, r, d in tasks}
-                list_futures = {executor.submit(fetch_race_detail, j, r, dstr): (j, r) for j, r, d in tasks}
-                
-                results_map = {(j, r): f.result()[0] for f, (j, r) in res_futures.items()} 
-                lists_map = {(j, r): f.result() for f, (j, r) in list_futures.items()}
-                
-                for (j, r), racers in lists_map.items():
-                    ranks = results_map.get((j, r), {})
-                    if racers and ranks:
-                        for i, racer in enumerate(racers):
-                            lane = i + 1
-                            all_data.append({
-                                "日付": dstr, "場": j, "レース": r, "枠番": lane,
-                                "勝率": racer.win_rate, "平均ST": racer.avg_st,
-                                "モーター": racer.motor_2rate, "着順": ranks.get(lane, "")
-                            })
-            prog.progress((idx + 1) / len(days))
-            
-        if all_data:
-            df = pd.DataFrame(all_data)
-            st.success(f"✅ 完了！ {len(df)} 艇分の全着順データを取得しました。")
-            st.download_button("📥 CSVをダウンロード", df.to_csv(index=False).encode('utf-8-sig'), "all_ranks_data.csv", "text/csv", use_container_width=True)
