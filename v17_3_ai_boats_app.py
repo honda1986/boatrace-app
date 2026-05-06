@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.10 全艇スコア解析アプリ（節間成績取得追加 ＆ タブ1フルデータ表示版）
+v17.11 全艇スコア解析アプリ（データ取得バグ完全修正＆フルデータ表示版）
 """
 
 import re
@@ -104,10 +104,10 @@ def _band(v: Optional[float], bands: List[Tuple[float, float, float]], default: 
 def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts: Dict[str, float] = {}
 
-    # 節間成績（今回からしっかり読み込まれます）
+    # AIが枠番を評価するためコース基礎加点は廃止
+
     parts["節平順"] = _band(r.settle_avg_rank, [(0.99, 1.50, 2.0), (1.50, 2.50, 1.2), (2.50, 3.50, 0.3), (3.50, 4.50, -0.5), (4.50, 6.01, -1.5)])
     
-    # 普段のSTと今節のSTの比較で「スタートが見えているか」を評価
     if r.settle_st is not None and r.avg_st is not None:
         delta = r.avg_st - r.settle_st
         if delta >= 0.02: parts["節ST改善"] = 1.0
@@ -185,7 +185,7 @@ def strategy_label(strategy: str) -> str:
     return {"safe": "安全2点", "standard": "標準4点", "wide": "拡張9点"}.get(strategy, strategy)
 
 # ============================================================
-# スクレイピング関数群（超・高速版 ＆ 節間データ取得対応版）
+# スクレイピング関数群（取得できていた頑丈な版をベースに改修）
 # ============================================================
 def get_html(url: str) -> Optional[str]:
     try:
@@ -218,23 +218,21 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
         lane = lane_map[cells[0].get_text(strip=True)]
         text = tb.get_text(" ", strip=True)
         
+        # F数の取得
         m_f = re.search(r"F\s*(\d+)", text)
         f_count = int(m_f.group(1)) if m_f else 0
         
-        m_fl = re.search(r"F\s*\d+\s+L\s*\d+", text)
-        if m_fl:
-            nums = re.findall(r"-?\d+\.\d+|\d+", text[m_fl.end():])
-            try:
-                avg_st = float(nums[0]) if len(nums)>0 and "." in nums[0] else 0.17
-                win_rate = float(nums[1]) if len(nums)>1 else 0.0
-                m2 = float(nums[8]) if len(nums)>8 else 0.0
-                motor = m2 / 100.0 if m2 > 1.0 else m2
-            except:
-                win_rate, avg_st, motor = 0.0, 0.17, 0.0
-        else:
+        # ★復元：データが取れていた頃の頑丈な正規表現を使用
+        nums = re.findall(r"-?\d+\.\d+|\d+", text)
+        try:
+            win_rate = float(nums[1]) if len(nums)>1 else 0.0
+            avg_st = float(nums[0]) if len(nums)>0 and "." in nums[0] else 0.17
+            m2 = float(nums[8]) if len(nums)>8 else 0.0
+            motor = m2 / 100.0 if m2 > 1.0 else m2
+        except:
             win_rate, avg_st, motor = 0.0, 0.17, 0.0
 
-        # ★追加：今節の着順とSTを取得して平均を計算する
+        # ★追加：今節の着順とSTを取得して平均を計算する（エラーになりにくい安全な設計）
         ranks = []
         sts = []
         for td in cells:
@@ -310,11 +308,11 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.10 超・爆速解析", layout="wide")
-st.title("🚤 v17.10 全艇スコア解析")
+st.set_page_config(page_title="v17.11 超・爆速解析", layout="wide")
+st.title("🚤 v17.11 全艇スコア解析")
 st.caption("AI一本化 ＆ フルデータ開示 ＆ 超・爆速15並列エンジン搭載")
 
-# タブを2つだけにする
+# タブを2つに絞る
 tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 バックテスト"])
 
 # ----------------------------------------------------
@@ -339,7 +337,6 @@ with tab1:
             
             st.success("解析完了！")
             
-            # ★変更：算出の元になった数値とスコアを全て表示
             df_disp = []
             for item in ranked:
                 racer = item["racer"]
