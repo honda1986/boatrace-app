@@ -6,7 +6,9 @@ v17.4 全艇スコア解析アプリ（LightGBM AI予測 ＋ 並列処理によ�
 import re
 import concurrent.futures
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+JST = timezone(timedelta(hours=+9), 'JST')
+
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -373,7 +375,7 @@ def boatrace_venues(date_str: str) -> List[int]:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def venues_for_date(d: datetime.date) -> List[Tuple[int, str]]:
-    today_ = datetime.now().date()
+    today_ = datetime.now(JST).date()
     date_str = d.strftime("%Y%m%d")
     jcds = boatrace_venues(date_str)
     if jcds: return [(j, JCD_NAME[j]) for j in jcds if j in JCD_NAME]
@@ -612,7 +614,7 @@ def render_venue_summary(venue: str):
 # ============================================================
 # UI処理 (タブ1・タブ2)
 # ============================================================
-today = datetime.now().date()
+today = datetime.now(JST).date()
 tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 期間バックテスト/当日スキャン"])
 
 with tab1:
