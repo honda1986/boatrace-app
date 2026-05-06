@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.7 全艇スコア解析アプリ（タブ2超・爆速バックテスト＆買い目・配当復活版）
+v17.8 全艇スコア解析アプリ（データ読み取りバグ修正 ＆ 超・爆速フル機能版）
 """
 
 import re
@@ -183,7 +183,7 @@ def strategy_label(strategy: str) -> str:
     return {"safe": "安全2点", "standard": "標準4点", "wide": "拡張9点"}.get(strategy, strategy)
 
 # ============================================================
-# スクレイピング関数群（超・高速版）
+# スクレイピング関数群（超・高速版 ＆ バグ修正版）
 # ============================================================
 def get_html(url: str) -> Optional[str]:
     try:
@@ -215,23 +215,30 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
         
         lane = lane_map[cells[0].get_text(strip=True)]
         text = tb.get_text(" ", strip=True)
-        m_fl = re.search(r"F\s*(\d+)", text)
-        f_count = int(m_fl.group(1)) if m_fl else 0
         
-        nums = re.findall(r"-?\d+\.\d+|\d+", text)
-        try:
-            win_rate = float(nums[1]) if len(nums)>1 else 0.0
-            avg_st = float(nums[0]) if len(nums)>0 and "." in nums[0] else 0.17
-            m2 = float(nums[8]) if len(nums)>8 else 0.0
-            motor = m2 / 100.0 if m2 > 1.0 else m2
-        except: win_rate, avg_st, motor = 0.0, 0.17, 0.0
+        # F数の取得
+        m_f = re.search(r"F\s*(\d+)", text)
+        f_count = int(m_f.group(1)) if m_f else 0
         
+        # ★大修正：勝率・ST・モーターは「F L」の文字の後ろから確実に拾う！
+        m_fl = re.search(r"F\s*\d+\s+L\s*\d+", text)
+        if m_fl:
+            nums = re.findall(r"-?\d+\.\d+|\d+", text[m_fl.end():])
+            try:
+                avg_st = float(nums[0]) if len(nums)>0 and "." in nums[0] else 0.17
+                win_rate = float(nums[1]) if len(nums)>1 else 0.0
+                m2 = float(nums[8]) if len(nums)>8 else 0.0
+                motor = m2 / 100.0 if m2 > 1.0 else m2
+            except:
+                win_rate, avg_st, motor = 0.0, 0.17, 0.0
+        else:
+            win_rate, avg_st, motor = 0.0, 0.17, 0.0
+            
         racers.append(Racer(name=f"艇{lane}", win_rate=win_rate, avg_st=avg_st, motor_2rate=motor, f_count=f_count))
     return racers if len(racers)==6 else None
 
 @st.cache_data(ttl=3600)
 def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, str], str, int]:
-    """着順、1-2-3の買い目、3連単配当金を同時に取得する"""
     html = get_html(f"{BOAT_URL}/raceresult?rno={rno}&jcd={jcd:02d}&hd={dstr}")
     if not html or "まだ結果がありません" in html or "発売中" in html:
         return {}, "", 0
@@ -250,7 +257,6 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 
     win_combo = ""
     payoff = 0
-    # 3連単の配当金を探す
     for tr in soup.find_all("tr"):
         row_text = tr.get_text(strip=True)
         if "3連単" in row_text or "３連単" in row_text:
@@ -264,7 +270,6 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
             if payoff > 0:
                 break
                 
-    # 確実な着順から「1-2-3」のテキストを作る
     try:
         r1 = next((k for k, v in lane_to_rank.items() if v == "1"), None)
         r2 = next((k for k, v in lane_to_rank.items() if v == "2"), None)
@@ -279,8 +284,8 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.7 超・爆速解析", layout="wide")
-st.title("🚤 v17.7 全艇スコア解析")
+st.set_page_config(page_title="v17.8 超・爆速解析", layout="wide")
+st.title("🚤 v17.8 全艇スコア解析")
 st.caption("AI一本化ロジック ＆ バックテスト/データ収集 超・爆速15並列エンジン搭載")
 
 tab1, tab2, tab3 = st.tabs(["🔍 1レース解析", "📊 バックテスト", "🤖 AIデータ収集"])
@@ -314,6 +319,7 @@ with tab1:
                     "枠": item["lane"],
                     "総合スコア": item["score"],
                     "AI加点": item["breakdown"].get("AI加点", 0.0),
+                    "勝率": round(item["racer"].win_rate, 2), # 確認用に追加
                     "コース基礎": item["breakdown"].get("コース基礎", 0.0),
                     "場×コース": item["breakdown"].get("場×コース", 0.0)
                 })
@@ -349,7 +355,6 @@ with tab2:
         matches = []
         prog = st.progress(0.0)
         
-        # 実行する全タスクのリストアップ
         tasks = []
         for dstr in days:
             jcds = boatrace_venues(dstr)
@@ -361,13 +366,12 @@ with tab2:
                     
         st.write(f"全 {len(tasks)} レースを15並列で一気に解析中...")
         
-        # 1レースを解析する分身（スレッド）の仕事
         def analyze_race(d, j, r):
             racers = fetch_race_detail(j, r, d)
             if not racers: return None
             
             ranks, actual_result, payoff = fetch_result_and_payoff(j, r, d)
-            if not actual_result: return None # まだ結果がない
+            if not actual_result: return None 
             
             venue_name = JCD_NAME.get(j, "不明")
             ranked = rank_all(racers, venue_name)
@@ -385,13 +389,12 @@ with tab2:
                 "点数": len(bets),
                 "結果": actual_result,
                 "的中": "🎯" if hit else "❌",
-                "払戻金": payoff, # 👈 外れても実際の配当を表示！
-                "獲得金": payoff if hit else 0, # 的中した時だけ手に入るお金
+                "払戻金": payoff, 
+                "獲得金": payoff if hit else 0, 
                 "スコア": top_score,
                 "AI加点": ai_score
             }
             
-        # ★超爆速エンジン（15人がかりで解析）
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             future_to_task = {executor.submit(analyze_race, d, j, r): (d, j, r) for d, j, r in tasks}
             done_count = 0
@@ -414,7 +417,6 @@ with tab2:
             st.success(f"解析完了！ 対象レース: {len(df_bt)}件 / 的中: {len(hits)}件 (的中率 {hit_rate:.1f}%)")
             st.info(f"💰 **総投資**: {total_invest:,}円 / **総回収**: {total_return:,}円 (回収率: {ret_rate:.1f}%)")
             
-            # 見やすくするため、表示から「点数」「獲得金」の内部列を隠す
             disp_cols = ["日付", "場", "R", "買い目", "結果", "的中", "払戻金", "スコア", "AI加点"]
             st.dataframe(df_bt[disp_cols], use_container_width=True)
         else:
@@ -449,7 +451,7 @@ with tab3:
                 res_futures = {executor.submit(fetch_result_and_payoff, j, r, dstr): (j, r) for j, r, d in tasks}
                 list_futures = {executor.submit(fetch_race_detail, j, r, dstr): (j, r) for j, r, d in tasks}
                 
-                results_map = {(j, r): f.result()[0] for f, (j, r) in res_futures.items()} # 着順マップだけ取る
+                results_map = {(j, r): f.result()[0] for f, (j, r) in res_futures.items()} 
                 lists_map = {(j, r): f.result() for f, (j, r) in list_futures.items()}
                 
                 for (j, r), racers in lists_map.items():
