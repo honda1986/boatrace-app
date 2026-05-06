@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.12 全艇スコア解析アプリ（データ取得ロジック完全復元・堅牢版）
+v17.13 全艇スコア解析アプリ（節間成績の計算式変更版）
 """
 
 import re
@@ -92,24 +92,18 @@ class Racer:
     f_count: int = 0
     exhibit_rank: Optional[int] = None
 
-def _band(v: Optional[float], bands: List[Tuple[float, float, float]], default: float = 0.0) -> float:
-    if v is None: return default
-    for lo, hi, pts in bands:
-        if lo <= v < hi: return pts
-    return default
-
 def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts: Dict[str, float] = {}
 
-    # AIが枠番を評価するためコース基礎加点は廃止
-    
-    parts["節平順"] = _band(r.settle_avg_rank, [(0.99, 1.50, 2.0), (1.50, 2.50, 1.2), (2.50, 3.50, 0.3), (3.50, 4.50, -0.5), (4.50, 6.01, -1.5)])
-    
-    if r.settle_st is not None and r.avg_st is not None:
-        delta = r.avg_st - r.settle_st
-        if delta >= 0.02: parts["節ST改善"] = 1.0
-        elif delta <= -0.02: parts["節ST改善"] = -1.0
-        else: parts["節ST改善"] = 0.0
+    # ★変更点1: 節平順（点）＝ 3.5 ÷ 節間平均順位
+    if r.settle_avg_rank and r.settle_avg_rank > 0:
+        parts["節平順"] = round(3.5 / r.settle_avg_rank, 2)
+    else:
+        parts["節平順"] = 0.0
+
+    # ★変更点2: ST改善（点）＝ 0.2 ÷ 節平均ST
+    if r.settle_st and r.settle_st > 0:
+        parts["節ST改善"] = round(0.2 / r.settle_st, 2)
     else:
         parts["節ST改善"] = 0.0
     
@@ -182,7 +176,7 @@ def strategy_label(strategy: str) -> str:
     return {"safe": "安全2点", "standard": "標準4点", "wide": "拡張9点"}.get(strategy, strategy)
 
 # ============================================================
-# スクレイピング関数群（★バグ完全修正・過去の堅牢ロジック復元版）
+# スクレイピング関数群
 # ============================================================
 def get_html(url: str) -> Optional[str]:
     try:
@@ -198,12 +192,10 @@ def boatrace_venues(dstr: str) -> List[int]:
     return sorted({int(m.group(1)) for m in re.finditer(r'jcd=(\d+)', html)})
 
 def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
-    """boatrace.jp公式 racelist ページから6艇分のRacerを抽出。過去の安定取得ロジックに復元。"""
     html = get_html(f"{BOAT_URL}/racelist?rno={rno}&jcd={jcd:02d}&hd={dstr}")
     if not html: return None
     soup = BeautifulSoup(html, "html.parser")
     
-    # 出走表テーブルを特定
     target = None
     for tbl in soup.find_all("table"):
         head = tbl.get_text(" ", strip=True)
@@ -216,7 +208,6 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
     rows = target.find_all("tr")
     lane_map = {"１":1,"２":2,"３":3,"４":4,"５":5,"６":6,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6}
 
-    # 各艇の主行（選手名などが書かれている1行目）を特定
     main_rows = []
     seen_lanes = set()
     for tr in rows:
@@ -234,7 +225,6 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
     if len(main_rows) < 6: return None
     main_rows.sort(key=lambda x: x[0])
 
-    # テーブル全体のtr配列上での主行インデックスを取得（これで節間成績の行位置が確実にわかる）
     all_trs = list(target.find_all("tr"))
     main_tr_indices = {}
     for lane, tr in main_rows:
@@ -245,11 +235,9 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
         full_text = tr.get_text(" ", strip=True)
         full_text = re.sub(r"\s+", " ", full_text)
         
-        # 選手名の取得
         a_tag = tr.find("a", href=re.compile(r"profile\?toban=\d+"))
         name = a_tag.get_text(strip=True).replace(" ", "").replace("　", "") if a_tag else f"選手{lane}"
 
-        # F・L数から後ろのテキストだけを切り取ることで、選手番号を拾ってしまう事故を防止
         fl_match = re.search(r"F\s*(\d+)\s+L\s*(\d+)", full_text)
         f_count = int(fl_match.group(1)) if fl_match else 0
 
@@ -269,7 +257,6 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
                 motor_2rate = m2v / 100.0 if m2v > 1.0 else m2v
             except: pass
 
-        # 今節成績集計: 主行の直後から進入コース(+1)/ST(+2)/着順(+3)の行を確実に取得
         settle_st = None
         settle_avg_rank = None
         idx = main_tr_indices.get(lane)
@@ -282,7 +269,6 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
             st_cells = cells_text(st_tr)
             fn_cells = cells_text(fn_tr)
 
-            # 節間STの抽出
             st_vals = []
             for c in st_cells:
                 if re.search(r"[FLK失]", c): continue
@@ -294,7 +280,6 @@ def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
                     except: pass
             if st_vals: settle_st = round(sum(st_vals) / len(st_vals), 3)
 
-            # 節間着順の抽出
             zen_to_han = str.maketrans("１２３４５６", "123456")
             ranks = []
             for c in fn_cells:
@@ -361,11 +346,10 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.12 超・爆速解析", layout="wide")
-st.title("🚤 v17.12 全艇スコア解析")
+st.set_page_config(page_title="v17.13 超・爆速解析", layout="wide")
+st.title("🚤 v17.13 全艇スコア解析")
 st.caption("AI一本化 ＆ フルデータ開示 ＆ 超・爆速15並列エンジン搭載")
 
-# タブを2つに絞る
 tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 バックテスト"])
 
 # ----------------------------------------------------
@@ -401,10 +385,8 @@ with tab1:
                     "選手名": racer.name,
                     "総合スコア": item["score"],
                     
-                    # --- AI関連 ---
                     "AI加点": bd.get("AI加点", 0.0),
                     
-                    # --- 元データ（選手の実績） ---
                     "勝率": round(racer.win_rate, 2) if racer.win_rate else 0.0,
                     "平均ST": round(racer.avg_st, 2) if racer.avg_st else 0.0,
                     "モーター": round(racer.motor_2rate, 2) if racer.motor_2rate else 0.0,
@@ -412,7 +394,6 @@ with tab1:
                     "節平均ST": round(racer.settle_st, 2) if racer.settle_st else "-",
                     "F数": racer.f_count,
                     
-                    # --- アプリの基礎スコア内訳 ---
                     "節平順(点)": bd.get("節平順", 0.0),
                     "ST改善(点)": bd.get("節ST改善", 0.0),
                     "F持ち(点)": bd.get("F持ち", 0.0),
