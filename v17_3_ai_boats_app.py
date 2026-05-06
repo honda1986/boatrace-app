@@ -21,17 +21,7 @@ import numpy as np
 # 日本時間の設定
 JST = timezone(timedelta(hours=+9), 'JST')
 
-# ============================================================
-# HTTP設定（超・爆速化のための通信エンジン）
-# ============================================================
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Mobile Safari/537.36"}
-req_session = requests.Session()
-req_session.headers.update(UA)
 
-# 通信の通り道を20本に拡張（15並列でも渋滞させない）
-adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=2)
-req_session.mount('https://', adapter)
-req_session.mount('http://', adapter)
 
 # ============================================================
 # kyoteibiyori.com 場別コース別データ
