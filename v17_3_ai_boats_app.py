@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.5 全艇スコア解析アプリ（AI学習データ収集タブ追加版）
+v17.7 全艇スコア解析アプリ（タブ2超・爆速バックテスト＆買い目・配当復活版）
 """
 
 import re
@@ -21,7 +21,25 @@ import numpy as np
 # 日本時間の設定
 JST = timezone(timedelta(hours=+9), 'JST')
 
+# ============================================================
+# HTTP設定（超・爆速化のための通信エンジン）
+# ============================================================
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Mobile Safari/537.36"}
+req_session = requests.Session()
+req_session.headers.update(UA)
 
+# 通信の通り道を20本に拡張（15並列でも渋滞させない）
+adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=3)
+req_session.mount('https://', adapter)
+req_session.mount('http://', adapter)
+
+BOAT_URL = "https://www.boatrace.jp/owpc/pc/race"
+JCD_NAME = {
+    1:"桐生", 2:"戸田", 3:"江戸川", 4:"平和島", 5:"多摩川", 6:"浜名湖",
+    7:"蒲郡", 8:"常滑", 9:"津", 10:"三国", 11:"びわこ", 12:"住之江",
+    13:"尼崎", 14:"鳴門", 15:"丸亀", 16:"児島", 17:"宮島", 18:"徳山",
+    19:"下関", 20:"若松", 21:"芦屋", 22:"福岡", 23:"唐津", 24:"大村"
+}
 
 # ============================================================
 # kyoteibiyori.com 場別コース別データ
@@ -54,123 +72,15 @@ COURSE_WIN_RATE: Dict[str, List[float]] = {
     "大村":   [61.3, 12.1, 11.3,  9.6, 5.0, 1.3],
 }
 
-COURSE_SASHI_RATE: Dict[str, List[float]] = {
-    "全国":   [ 8.8, 1.5, 2.1, 0.3, 0.2],
-    "桐生":   [ 8.1, 1.2, 1.7, 0.3, 0.0],
-    "戸田":   [ 8.2, 1.9, 2.4, 0.3, 0.1],
-    "江戸川": [11.3, 1.7, 2.6, 0.5, 0.0],
-    "平和島": [11.6, 2.0, 4.0, 0.8, 1.2],
-    "多摩川": [10.6, 1.8, 2.2, 0.3, 0.4],
-    "浜名湖": [ 9.1, 1.8, 1.8, 0.4, 0.3],
-    "蒲郡":   [ 6.1, 1.0, 1.5, 0.3, 0.1],
-    "常滑":   [ 7.7, 0.7, 1.4, 0.1, 0.0],
-    "津":     [11.1, 1.5, 2.3, 0.3, 0.1],
-    "三国":   [10.2, 2.3, 2.6, 0.4, 0.1],
-    "びわこ": [ 9.1, 1.9, 2.9, 0.2, 0.2],
-    "住之江": [ 9.8, 1.6, 2.4, 0.5, 0.2],
-    "尼崎":   [ 7.2, 1.5, 1.9, 0.3, 0.0],
-    "鳴門":   [ 9.1, 1.9, 2.6, 0.7, 0.3],
-    "丸亀":   [11.6, 1.1, 2.4, 0.3, 0.5],
-    "児島":   [ 9.2, 1.8, 2.5, 0.1, 0.3],
-    "宮島":   [ 7.8, 1.1, 1.7, 0.2, 0.1],
-    "徳山":   [ 9.3, 1.2, 1.3, 0.3, 0.2],
-    "下関":   [ 7.1, 1.3, 1.7, 0.4, 0.4],
-    "若松":   [ 7.5, 1.1, 2.1, 0.4, 0.1],
-    "芦屋":   [ 6.0, 0.8, 1.4, 0.2, 0.1],
-    "福岡":   [ 8.4, 1.7, 1.6, 0.2, 0.0],
-    "唐津":   [ 9.2, 1.5, 2.2, 0.2, 0.0],
-    "大村":   [ 7.3, 1.4, 1.4, 0.0, 0.0],
-}
+COURSE_BASE_POINTS: Dict[int, float] = {1: 2.0, 2: 0.5, 3: 0.0, 4: -0.5, 5: -1.0, 6: -1.5}
 
-COURSE_MAKURI_RATE: Dict[str, List[float]] = {
-    "全国":   [3.6, 5.1, 5.1, 1.3, 0.4],
-    "桐生":   [3.7, 4.9, 7.1, 1.7, 0.4],
-    "戸田":   [6.5, 8.5, 7.9, 2.0, 0.7],
-    "江戸川": [4.4, 6.7, 5.9, 2.2, 0.9],
-    "平和島": [3.1, 6.7, 5.1, 1.3, 0.7],
-    "多摩川": [4.1, 4.8, 5.7, 1.3, 0.3],
-    "浜名湖": [5.0, 4.0, 4.7, 0.9, 0.3],
-    "蒲郡":   [4.7, 4.7, 7.1, 1.2, 0.6],
-    "常滑":   [3.6, 4.1, 6.1, 1.9, 0.5],
-    "津":     [3.3, 3.6, 3.6, 0.6, 0.1],
-    "三国":   [2.9, 5.2, 4.3, 0.9, 0.3],
-    "びわこ": [4.1, 4.6, 4.3, 0.7, 0.4],
-    "住之江": [3.5, 5.1, 3.7, 1.0, 0.4],
-    "尼崎":   [3.4, 4.4, 5.6, 0.7, 0.6],
-    "鳴門":   [4.6, 7.2, 5.3, 1.3, 0.4],
-    "丸亀":   [2.2, 3.9, 4.1, 0.7, 0.6],
-    "児島":   [2.1, 4.2, 5.1, 0.9, 0.4],
-    "宮島":   [4.2, 5.6, 4.4, 1.6, 0.7],
-    "徳山":   [2.1, 3.2, 2.7, 0.7, 0.1],
-    "下関":   [2.4, 4.4, 5.9, 2.1, 1.0],
-    "若松":   [2.9, 6.1, 5.0, 1.6, 0.4],
-    "芦屋":   [3.1, 4.2, 5.6, 1.4, 0.4],
-    "福岡":   [4.7, 9.0, 4.0, 1.0, 0.4],
-    "唐津":   [3.3, 4.3, 4.6, 1.2, 0.3],
-    "大村":   [2.8, 3.1, 4.3, 0.9, 0.3],
-}
+def venue_course_bonus(v: str, l: int) -> float:
+    if v not in COURSE_WIN_RATE: return 0.0
+    return round((COURSE_WIN_RATE[v][l-1] - COURSE_WIN_RATE["全国"][l-1]) * 0.1, 2)
 
-COURSE_MAKURI_SASHI_RATE: Dict[str, List[float]] = {
-    "全国":   [4.6, 2.7, 3.6, 0.7],
-    "桐生":   [5.3, 2.5, 4.5, 0.5],
-    "戸田":   [4.7, 3.1, 4.4, 1.1],
-    "江戸川": [3.7, 2.0, 3.4, 0.7],
-    "平和島": [3.6, 2.9, 4.7, 1.3],
-    "多摩川": [4.6, 2.6, 3.5, 0.4],
-    "浜名湖": [6.6, 3.7, 4.5, 0.7],
-    "蒲郡":   [6.4, 3.8, 3.9, 0.4],
-    "常滑":   [4.7, 2.3, 4.1, 0.8],
-    "津":     [5.0, 2.4, 3.3, 0.6],
-    "三国":   [4.9, 2.9, 3.0, 0.5],
-    "びわこ": [3.7, 2.8, 2.7, 0.8],
-    "住之江": [3.8, 2.5, 3.0, 0.6],
-    "尼崎":   [4.8, 3.1, 3.8, 0.7],
-    "鳴門":   [5.4, 2.9, 4.3, 1.1],
-    "丸亀":   [5.4, 2.9, 3.6, 1.0],
-    "児島":   [4.5, 3.3, 4.1, 0.8],
-    "宮島":   [4.7, 2.2, 3.7, 0.9],
-    "徳山":   [3.4, 1.5, 2.9, 0.6],
-    "下関":   [4.0, 2.4, 2.8, 0.9],
-    "若松":   [3.6, 3.0, 3.2, 0.8],
-    "芦屋":   [4.8, 2.9, 3.7, 1.1],
-    "福岡":   [2.5, 2.3, 2.7, 0.4],
-    "唐津":   [5.8, 2.4, 4.4, 0.7],
-    "大村":   [5.4, 2.8, 3.2, 0.7],
-}
-
-COURSE_BASE_POINTS: Dict[int, float] = {
-    1: 2.0, 2: 0.5, 3: 0.0, 4: -0.5, 5: -1.0, 6: -1.5,
-}
-
-VENUE_WIN_RATE_COEF = 0.10
-VENUE_ATTACK_COEF = 0.08
-
-def venue_course_bonus(venue: str, lane: int) -> float:
-    if venue not in COURSE_WIN_RATE or not 1 <= lane <= 6: return 0.0
-    nat = COURSE_WIN_RATE["全国"][lane - 1]
-    ven = COURSE_WIN_RATE[venue][lane - 1]
-    return round((ven - nat) * VENUE_WIN_RATE_COEF, 2)
-
-def venue_attack_bonus(venue: str, lane: int) -> float:
-    if lane < 3 or venue not in COURSE_MAKURI_RATE: return 0.0
-    idx = lane - 2
-    nat = COURSE_MAKURI_RATE["全国"][idx]
-    ven = COURSE_MAKURI_RATE[venue][idx]
-    ms_idx = lane - 3
-    nat += COURSE_MAKURI_SASHI_RATE["全国"][ms_idx]
-    ven += COURSE_MAKURI_SASHI_RATE[venue][ms_idx]
-    return round((ven - nat) * VENUE_ATTACK_COEF, 2)
-
-def venue_tendency_label(venue: str) -> str:
-    if venue not in COURSE_WIN_RATE: return ""
-    v = COURSE_WIN_RATE[venue]
-    nat = COURSE_WIN_RATE["全国"]
-    diff_1c = v[0] - nat[0]
-    if diff_1c >= 5: return f"🟢 イン強烈({v[0]:.1f}%)"
-    elif diff_1c >= 2: return f"🟢 インやや有利({v[0]:.1f}%)"
-    elif diff_1c <= -5: return f"🔴 イン不利({v[0]:.1f}%)・荒れ水面"
-    elif diff_1c <= -2: return f"🟡 インやや不利({v[0]:.1f}%)"
-    else: return f"⚪ 標準({v[0]:.1f}%)"
+def venue_attack_bonus(v: str, l: int) -> float:
+    if l < 2 or v not in COURSE_WIN_RATE: return 0.0
+    return round((COURSE_WIN_RATE[v][l-1] - COURSE_WIN_RATE["全国"][l-1]) * 0.05, 2)
 
 # ============================================================
 # データ構造・スコアリング
@@ -186,9 +96,7 @@ class Racer:
     motor_2rate: Optional[float] = None
     f_count: int = 0
     exhibit_rank: Optional[int] = None
-    course5_avg_st: Optional[float] = None
     weight: Optional[float] = None
-    makuri_rate: Optional[float] = None
 
 def _band(v: Optional[float], bands: List[Tuple[float, float, float]], default: float = 0.0) -> float:
     if v is None: return default
@@ -198,60 +106,34 @@ def _band(v: Optional[float], bands: List[Tuple[float, float, float]], default: 
 
 def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts: Dict[str, float] = {}
-
-    # ① 基本の有利不利（枠番）
     parts["コース基礎"] = COURSE_BASE_POINTS.get(lane, 0.0)
 
-    # ＝＝＝ AIに任せるため「級別」「勝率」「ST」「モーター」の手計算を削除！ ＝＝＝
-
-    # ② 節間の調子（今節の成績・スタート見えているか）は当日の生データとして残す
     parts["節平順"] = _band(r.settle_avg_rank, [(0.99, 1.50, 2.0), (1.50, 2.50, 1.2), (2.50, 3.50, 0.3), (3.50, 4.50, -0.5), (4.50, 6.01, -1.5)])
-
     if r.settle_st is not None and r.avg_st is not None:
         delta = r.avg_st - r.settle_st
-        if delta >= 0.04: parts["節ST改善"] = 1.5
-        elif delta >= 0.02: parts["節ST改善"] = 1.0
-        elif delta >= 0.00: parts["節ST改善"] = 0.3
-        elif delta >= -0.02: parts["節ST改善"] = -0.3
-        else: parts["節ST改善"] = -1.0
-    else:
-        parts["節ST改善"] = 0.0
-
-    # ③ 直前の気配・ペナルティ状況（展示・体重・フライング）
+        if delta >= 0.02: parts["節ST改善"] = 1.0
+        elif delta <= -0.02: parts["節ST改善"] = -1.0
+        else: parts["節ST改善"] = 0.0
+    
     exhibit_scores = {1: 1.5, 2: 0.8, 3: 0.3, 4: -0.2, 5: -0.6, 6: -1.0}
     parts["展示"] = exhibit_scores.get(r.exhibit_rank, 0.0)
-
-    if r.weight is not None:
-        if r.weight <= 52.0: parts["体重"] = 0.5
-        elif r.weight >= 57.0: parts["体重"] = -0.5
-        else: parts["体重"] = 0.0
-    else:
-        parts["体重"] = 0.0
-
-    if r.f_count == 1: parts["F持ち"] = -1.5
-    elif r.f_count >= 2: parts["F持ち"] = -3.0
-    else: parts["F持ち"] = 0.0
-
-    # ④ 開催場の独自データ（水面特性）
+    if r.f_count >= 1: parts["F持ち"] = -1.5 * r.f_count
+    
     parts["場×コース"] = venue_course_bonus(venue, lane)
     parts["場×攻め"]   = venue_attack_bonus(venue, lane)
 
-    total = round(sum(parts.values()), 2)
-    parts["合計"] = total
+    parts["合計"] = round(sum(parts.values()), 2)
     return parts
 
-
 # ============================================================
-# LightGBM AI予測の追加設定
+# AI予測・ランキング・買い目生成
 # ============================================================
 @st.cache_resource
 def load_lgb_model():
-    try:
-        return lgb.Booster(model_file='lgb_model.txt')
-    except Exception as e:
-        return None
+    try: return lgb.Booster(model_file='lgb_model.txt')
+    except: return None
 
-def get_lgb_features(r: Racer, venue: str, lane: int) -> list:
+def get_lgb_features(r: Racer, lane: int) -> list:
     return [float(lane), float(r.win_rate or 0.0), float(r.avg_st or 0.17), float(r.motor_2rate or 0.0)]
 
 def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
@@ -261,32 +143,33 @@ def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
         lane = i + 1
         bd = score_boat(r, venue, lane)
         ai_score = 0.0
-        if lgb_model is not None:
-            features = get_lgb_features(r, venue, lane)
-            ai_pred = lgb_model.predict([features])[0]
+        if lgb_model:
+            ai_pred = lgb_model.predict([get_lgb_features(r, lane)])[0]
             ai_score = round(ai_pred * 10, 2)
             bd["AI加点"] = ai_score 
             
-        final_score = bd["合計"] + ai_score
-        bd["総合計(AI込)"] = round(final_score, 2)
+        final_score = round(bd["合計"] + ai_score, 2)
+        bd["総合計(AI込)"] = final_score
         out.append({"lane": lane, "racer": r, "score": final_score, "breakdown": bd})
-        
     out.sort(key=lambda x: x["score"], reverse=True)
     return out
 
-def make_bets(ranked: List[Dict], strategy: str = "standard", odds_map: Optional[Dict[str, float]] = None, min_odds: float = 0.0) -> List[str]:
+def make_bets(ranked: List[Dict], strategy: str = "standard") -> List[str]:
     if len(ranked) < 4: return []
     lanes = [x["lane"] for x in ranked]
-    l1, l2, l3, l4, l5 = lanes[0], lanes[1], lanes[2], lanes[3], lanes[4]
-
-    if strategy == "safe": raw = [f"{l1}-{l2}-{l3}", f"{l1}-{l3}-{l2}"]
-    elif strategy == "wide":
+    l1, l2, l3, l4 = lanes[0], lanes[1], lanes[2], lanes[3]
+    l5 = lanes[4] if len(lanes) >= 5 else l4
+    
+    if strategy == "safe": 
+        return [f"{l1}-{l2}-{l3}", f"{l1}-{l3}-{l2}"]
+    elif strategy == "wide": 
         raw = []
         for s in (l2, l3, l4):
             for t in (l2, l3, l4, l5):
                 if t != s and t != l1 and s != l1:
                     c = f"{l1}-{s}-{t}"
                     if c not in raw: raw.append(c)
+        return raw
     else:
         raw = []
         for s in (l2, l3):
@@ -294,519 +177,294 @@ def make_bets(ranked: List[Dict], strategy: str = "standard", odds_map: Optional
                 if t != s and t != l1 and s != l1:
                     c = f"{l1}-{s}-{t}"
                     if c not in raw: raw.append(c)
-
-    if odds_map and min_odds > 0:
-        raw = [c for c in raw if odds_map.get(c, 0) >= min_odds]
-    return raw
+        return raw
 
 def strategy_label(strategy: str) -> str:
     return {"safe": "安全2点", "standard": "標準4点", "wide": "拡張9点"}.get(strategy, strategy)
 
 # ============================================================
-# 定数・UI初期設定
+# スクレイピング関数群（超・高速版）
 # ============================================================
-st.set_page_config(page_title="v17.5 全艇スコア解析(AI収集搭載)", layout="centered")
-st.title("🚤 v17.5 全艇スコア解析")
-st.caption("AI(LightGBM)搭載 ＆ AI学習データ(CSV)自動収集機能付き！")
+def get_html(url: str) -> Optional[str]:
+    try:
+        r = req_session.get(url, timeout=10)
+        r.encoding = r.apparent_encoding
+        return r.text if r.status_code == 200 else None
+    except: return None
 
-UCHI   = "https://uchisankaku.sakura.ne.jp"
-BOAT   = "https://www.boatrace.jp/owpc/pc/race"
-KYOTEI = "https://kyotei.sakura.ne.jp"
-UA = {"User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"}
-
-JCD_NAME = {
-    1:"桐生", 2:"戸田", 3:"江戸川", 4:"平和島", 5:"多摩川", 6:"浜名湖",
-    7:"蒲郡", 8:"常滑", 9:"津", 10:"三国", 11:"びわこ", 12:"住之江",
-    13:"尼崎", 14:"鳴門", 15:"丸亀", 16:"児島", 17:"宮島", 18:"徳山",
-    19:"下関", 20:"若松", 21:"芦屋", 22:"福岡", 23:"唐津", 24:"大村",
-}
-NAME_JCD = {v: k for k, v in JCD_NAME.items()}
-
-# ============================================================
-# HTTP (並列処理対応セッション)
-# ============================================================
-req_session = requests.Session()
-req_session.headers.update(UA)
-
-def get(url: str, retries: int = 2) -> Optional[str]:
-    for _ in range(retries):
-        try:
-            r = req_session.get(url, timeout=10)
-            r.encoding = r.apparent_encoding or "utf-8"
-            if r.status_code == 200: return r.text
-        except requests.RequestException:
-            pass
-    return None
-
-# ============================================================
-# スクレイピング関数 (公式)
-# ============================================================
-@st.cache_data(ttl=600, show_spinner=False)
-def boatrace_venues(date_str: str) -> List[int]:
-    html = get(f"{BOAT}/index?hd={date_str}")
+@st.cache_data(ttl=600)
+def boatrace_venues(dstr: str) -> List[int]:
+    html = get_html(f"{BOAT_URL}/index?hd={dstr}")
     if not html: return []
-    soup = BeautifulSoup(html, "html.parser")
-    pat = re.compile(rf'raceindex\?jcd=(\d+)&hd={re.escape(date_str)}')
-    jcds = set()
-    for a in soup.find_all("a", href=True):
-        m = pat.search(a["href"])
-        if m:
-            jcd = int(m.group(1))
-            if jcd in JCD_NAME: jcds.add(jcd)
-    return sorted(jcds)
+    return sorted({int(m.group(1)) for m in re.finditer(r'jcd=(\d+)', html)})
 
-@st.cache_data(ttl=600, show_spinner=False)
-def venues_for_date(d: datetime.date) -> List[Tuple[int, str]]:
-    date_str = d.strftime("%Y%m%d")
-    jcds = boatrace_venues(date_str)
-    if jcds: return [(j, JCD_NAME[j]) for j in jcds if j in JCD_NAME]
-
-    html = get(f"{UCHI}/raceindex.php")
-    if not html: return []
-    soup = BeautifulSoup(html, "html.parser")
-    seen, result = set(), []
-    for a in soup.find_all("a", href=True):
-        m = re.search(r"racelist\.php\?jcode=(\d+)", a["href"])
-        if not m or "出走表" not in a.get_text(): continue
-        jcd = int(m.group(1))
-        if jcd not in seen and jcd in JCD_NAME:
-            seen.add(jcd)
-            result.append((jcd, JCD_NAME[jcd]))
-    result.sort(key=lambda x: x[0])
-    return result
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _fetch_official_racelist_html(jcd: int, rno: int, date_str: str) -> Optional[str]:
-    return get(f"{BOAT}/racelist?rno={rno}&jcd={jcd:02d}&hd={date_str}")
-
-def _parse_official_racelist(html: str) -> List[Racer]:
-    soup = BeautifulSoup(html, "html.parser")
-    target = next((tbl for tbl in soup.find_all("table") if all(k in tbl.get_text(" ", strip=True) for k in ["ボートレーサー", "全国", "当地", "モーター"])), None)
-    if not target: return []
-
-    racers: List[Racer] = []
-    rows = target.find_all("tr")
-    lane_map = {"１": 1, "２": 2, "３": 3, "４": 4, "５": 5, "６": 6, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6}
-    main_rows = []
-    seen_lanes = set()
-    for tr in rows:
-        a_test = tr.find("a", href=re.compile(r"profile\?toban=\d+"))
-        if not a_test: continue
-        cells = tr.find_all(["td", "th"])
-        if not cells: continue
-        first_text = cells[0].get_text(strip=True)
-        if first_text in lane_map and lane_map[first_text] not in seen_lanes:
-            lane = lane_map[first_text]
-            main_rows.append((lane, tr))
-            seen_lanes.add(lane)
-            if len(main_rows) >= 6: break
-
-    if len(main_rows) < 6: return []
-    main_rows.sort(key=lambda x: x[0])
-    all_trs = list(target.find_all("tr"))
-    main_tr_indices = {lane: all_trs.index(tr) for lane, tr in main_rows if tr in all_trs}
-
-    for lane, tr in main_rows:
-        full_text = re.sub(r"\s+", " ", tr.get_text(" ", strip=True))
-        cls_ = re.search(r"/\s*(A1|A2|B1|B2)\b", full_text)
-        cls_ = cls_.group(1) if cls_ else ""
-        wt_match = re.search(r"(\d+\.\d+)\s*kg", full_text)
-        weight = float(wt_match.group(1)) if wt_match else None
-        a_tag = tr.find("a", href=re.compile(r"profile\?toban=\d+"))
-        name = a_tag.get_text(strip=True).replace(" ", "").replace("　", "") if a_tag else f"選手{lane}"
-
-        fl_match = re.search(r"F\s*(\d+)\s+L\s*(\d+)", full_text)
-        f_count = int(fl_match.group(1)) if fl_match else 0
-
-        avg_st, win_rate, motor_2rate = None, None, None
-        if fl_match:
-            nums = re.findall(r"-?\d+\.\d+|\d+", full_text[fl_match.end():])
-            try: avg_st = float(nums[0]) if "." in nums[0] else None
-            except: pass
-            try: win_rate = float(nums[1])
-            except: pass
-            try:
-                m2v = float(nums[8])
-                motor_2rate = m2v / 100.0 if m2v > 1.0 else m2v
-            except: pass
-
-        settle_st, settle_avg_rank = None, None
-        idx = main_tr_indices.get(lane)
-        if idx is not None and idx + 3 < len(all_trs):
-            st_cells = [td.get_text(strip=True) for td in all_trs[idx + 2].find_all(["td", "th"])]
-            st_vals = [float("0"+c) if re.fullmatch(r"\.\d+", c) else float(c) for c in st_cells if not re.search(r"[FLK失]", c) and (re.fullmatch(r"\.\d+", c) or re.fullmatch(r"0\.\d+", c))]
-            if st_vals: settle_st = round(sum(st_vals) / len(st_vals), 3)
-
-            ranks = [int(c.translate(str.maketrans("１２３４５６", "123456"))) for c in [td.get_text(strip=True) for td in all_trs[idx + 3].find_all(["td", "th"])] if re.fullmatch(r"[1-6]", c.translate(str.maketrans("１２３４５６", "123456")))]
-            if ranks: settle_avg_rank = round(sum(ranks) / len(ranks), 2)
-
-        racers.append(Racer(name=name, cls=cls_, win_rate=win_rate, avg_st=avg_st, settle_st=settle_st, settle_avg_rank=settle_avg_rank, motor_2rate=motor_2rate, f_count=f_count, weight=weight, course5_avg_st=avg_st))
-    return racers
-
-def fetch_race(jcd: int, rno: int, date_str: str) -> List[Racer]:
-    html = _fetch_official_racelist_html(jcd, rno, date_str)
-    return _parse_official_racelist(html) if html else []
-
-def fetch_racelist(jcd: int, date_str: str) -> Dict[int, List[Racer]]:
-    out: Dict[int, List[Racer]] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
-        future_to_rno = {executor.submit(fetch_race, jcd, rno, date_str): rno for rno in range(1, 13)}
-        for future in concurrent.futures.as_completed(future_to_rno):
-            rno = future_to_rno[future]
-            try:
-                racers = future.result()
-                if len(racers) == 6: out[rno] = racers
-            except: pass
-    return out
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_result(date_str: str, jcd: int, rno: int) -> Optional[Dict]:
-    html  = get(f"{BOAT}/raceresult?rno={rno}&jcd={jcd:02d}&hd={date_str}")
+def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
+    html = get_html(f"{BOAT_URL}/racelist?rno={rno}&jcd={jcd:02d}&hd={dstr}")
     if not html: return None
     soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(" ", strip=True)
-    if "まだ結果がありません" in text or "発売中" in text: return None
-
-    finish = [int(tds[1]) for tbody in soup.select("div.table1 table tbody") if len(tds := [td.get_text(strip=True) for td in tbody.find_all("td")]) >= 2 and re.fullmatch(r"\d+", tds[0]) and re.fullmatch(r"[1-6]", tds[1])][:6]
-    if len(finish) < 3: return None
-
-    combo, pay = None, 0
-    m = re.search(r"3連単.*?([1-6])\s*[-ー‐]\s*([1-6])\s*[-ー‐]\s*([1-6]).*?¥?\s*([\d,]+)", text)
-    if m: combo, pay = f"{m.group(1)}-{m.group(2)}-{m.group(3)}", int(m.group(4).replace(",", ""))
-    kim = km.group(1) if (km := re.search(r"(逃げ|まくり差し|まくり|差し|抜き|恵まれ)", text)) else None
-
-    return {"finish": finish, "combo": combo, "payout": pay, "kimarite": kim}
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
-    html = get(f"{BOAT}/odds3t?rno={rno}&jcd={jcd:02d}&hd={date_str}")
-    if not html: return {}
-    soup = BeautifulSoup(html, "html.parser")
-    if "発売前" in soup.get_text() or "まだ発売されていません" in soup.get_text(): return {}
-
-    combo_order = [f"{a}-{b}-{c}" for a in range(1, 7) for b in range(1, 7) if b != a for c in range(1, 7) if c not in (a, b)]
-    def collect_odds_cells(tbl): return [float(txt) for td in tbl.find_all("td") if (txt := td.get_text(strip=True).replace(",", "").replace(" ", "")) and (re.fullmatch(r"\d+\.\d+", txt) or (re.fullmatch(r"\d+", txt) and len(txt) >= 2))]
+    target = next((tbl for tbl in soup.find_all("table") if "ボートレーサー" in tbl.get_text()), None)
+    if not target: return None
     
-    target_cells = next((cells for tbl in soup.find_all("table") if len(cells := collect_odds_cells(tbl)) == 120), [])
-    if not target_cells:
-        best_cells = max((collect_odds_cells(tbl) for tbl in soup.find_all("table")), key=len, default=[])
-        if len(best_cells) == 120: target_cells = best_cells
-        else: return {}
-
-    return {combo_order[(i % 6) * 20 + (i // 6)]: v for i, v in enumerate(target_cells) if 0 <= (i % 6) * 20 + (i // 6) < 120}
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_exhibit_times(date_str: str, jcd: int, rno: int) -> List[Optional[float]]:
-    html = get(f"{BOAT}/beforeinfo?rno={rno}&jcd={jcd:02d}&hd={date_str}")
-    if not html: return [None] * 6
-    soup = BeautifulSoup(html, "html.parser")
-    if "情報がありません" in soup.get_text() or "発表前" in soup.get_text(): return [None] * 6
-
-    times: List[Optional[float]] = [None] * 6
-    target_table = next((tbl for tbl in soup.find_all("table") if all(k in tbl.get_text(" ", strip=True) for k in ["展示", "タイム", "ボートレーサー"])), None)
-    if not target_table: return times
-
-    lane_idx = 0
-    for tr in target_table.find_all("tr"):
+    racers = []
+    lane_map = {"１":1,"２":2,"３":3,"４":4,"５":5,"６":6,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6}
+    for tb in target.find_all("tbody"):
+        tr = tb.find("tr")
+        if not tr: continue
         cells = tr.find_all(["td", "th"])
-        if not cells: continue
-        first = cells[0].get_text(strip=True)
-        if first in ("1", "2", "3", "4", "5", "6") and lane_idx < 6:
-            lane = int(first) - 1
-            for m in re.finditer(r"\b(\d+\.\d+)\b", tr.get_text(" ", strip=True)):
-                v = float(m.group(1))
-                if 5.50 <= v <= 8.50:
-                    times[lane] = v
-                    break
-            lane_idx = lane + 1
-    return times
+        if not cells or cells[0].get_text(strip=True) not in lane_map: continue
+        
+        lane = lane_map[cells[0].get_text(strip=True)]
+        text = tb.get_text(" ", strip=True)
+        m_fl = re.search(r"F\s*(\d+)", text)
+        f_count = int(m_fl.group(1)) if m_fl else 0
+        
+        nums = re.findall(r"-?\d+\.\d+|\d+", text)
+        try:
+            win_rate = float(nums[1]) if len(nums)>1 else 0.0
+            avg_st = float(nums[0]) if len(nums)>0 and "." in nums[0] else 0.17
+            m2 = float(nums[8]) if len(nums)>8 else 0.0
+            motor = m2 / 100.0 if m2 > 1.0 else m2
+        except: win_rate, avg_st, motor = 0.0, 0.17, 0.0
+        
+        racers.append(Racer(name=f"艇{lane}", win_rate=win_rate, avg_st=avg_st, motor_2rate=motor, f_count=f_count))
+    return racers if len(racers)==6 else None
 
-def assign_exhibit_ranks(times: List[Optional[float]]) -> List[Optional[int]]:
-    valid = sorted([(i, t) for i, t in enumerate(times) if t is not None], key=lambda x: x[1])
-    ranks: List[Optional[int]] = [None] * 6
-    for rank, (i, _) in enumerate(valid, start=1): ranks[i] = rank
-    return ranks
+@st.cache_data(ttl=3600)
+def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, str], str, int]:
+    """着順、1-2-3の買い目、3連単配当金を同時に取得する"""
+    html = get_html(f"{BOAT_URL}/raceresult?rno={rno}&jcd={jcd:02d}&hd={dstr}")
+    if not html or "まだ結果がありません" in html or "発売中" in html:
+        return {}, "", 0
+        
+    soup = BeautifulSoup(html, "html.parser")
+    lane_to_rank = {}
+    
+    for tbody in soup.select("div.table1 table tbody"):
+        for tr in tbody.find_all("tr"):
+            tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+            if len(tds) >= 2:
+                r_str = tds[0].translate(str.maketrans('１２３４５６７８９０', '1234567890'))
+                l_str = tds[1].translate(str.maketrans('１２３４５６７８９０', '1234567890'))
+                if l_str.isdigit() and int(l_str) not in lane_to_rank:
+                    lane_to_rank[int(l_str)] = r_str
 
-def render_venue_summary(venue: str):
-    if venue not in COURSE_WIN_RATE: return
-    st.markdown(f"### 🗺️ 場の傾向 — {venue} {venue_tendency_label(venue)}")
-    st.caption("kyoteibiyori集計 2023/03/12〜2024/03/12")
-    nat, ven = COURSE_WIN_RATE["全国"], COURSE_WIN_RATE[venue]
-    rows = [{"C": i+1, "基礎": f"{COURSE_BASE_POINTS[i+1]:+.1f}", "場1着率": f"{ven[i]:.1f}%", "場×C": f"{venue_course_bonus(venue, i+1):+.2f}", "場×攻": f"{venue_attack_bonus(venue, i+1):+.2f}" if i+1 >= 2 else "-"} for i in range(6)]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
+    win_combo = ""
+    payoff = 0
+    # 3連単の配当金を探す
+    for tr in soup.find_all("tr"):
+        row_text = tr.get_text(strip=True)
+        if "3連単" in row_text or "３連単" in row_text:
+            cells = tr.find_all("td")
+            if len(cells) >= 2:
+                for td in cells:
+                    txt = td.get_text(strip=True).replace(",", "").replace("¥", "").replace("円", "")
+                    if txt.isdigit():
+                        payoff = int(txt)
+                        break
+            if payoff > 0:
+                break
+                
+    # 確実な着順から「1-2-3」のテキストを作る
+    try:
+        r1 = next((k for k, v in lane_to_rank.items() if v == "1"), None)
+        r2 = next((k for k, v in lane_to_rank.items() if v == "2"), None)
+        r3 = next((k for k, v in lane_to_rank.items() if v == "3"), None)
+        if r1 and r2 and r3:
+            win_combo = f"{r1}-{r2}-{r3}"
+    except:
+        pass
+        
+    return lane_to_rank, win_combo, payoff
 
 # ============================================================
-# UI処理 (タブ1・タブ2・タブ3)
+# メインUI
 # ============================================================
-today = datetime.now(JST).date()
-tab1, tab2, tab3 = st.tabs(["🔍 1レース解析", "📊 期間バックテスト", "🤖 AIデータ収集"])
+st.set_page_config(page_title="v17.7 超・爆速解析", layout="wide")
+st.title("🚤 v17.7 全艇スコア解析")
+st.caption("AI一本化ロジック ＆ バックテスト/データ収集 超・爆速15並列エンジン搭載")
 
+tab1, tab2, tab3 = st.tabs(["🔍 1レース解析", "📊 バックテスト", "🤖 AIデータ収集"])
+
+# ----------------------------------------------------
+# タブ1: 1レース解析
+# ----------------------------------------------------
 with tab1:
-    c1, c2 = st.columns([3, 1])
-    with c1: t1_date = st.date_input("日付", value=today, min_value=datetime(2020,1,1).date(), max_value=today + timedelta(days=1), key="t1_date")
-    with c2:
-        st.write("")
-        st.write("")
-        if st.button("🔄", key="t1_reload"): st.cache_data.clear()
+    st.subheader("🔍 1レース解析")
+    col1, col2 = st.columns(2)
+    with col1:
+        d_input = st.date_input("日付", value=datetime.now(JST).date())
+    with col2:
+        v_idx = st.selectbox("場", options=list(JCD_NAME.keys()), format_func=lambda x: JCD_NAME[x])
+        
+    r_idx = st.selectbox("レース", options=list(range(1, 13)))
+    
+    if st.button("🔍 解析開始", type="primary", use_container_width=True):
+        dstr = d_input.strftime("%Y%m%d")
+        racers = fetch_race_detail(v_idx, r_idx, dstr)
+        if racers:
+            venue_name = JCD_NAME[v_idx]
+            ranked = rank_all(racers, venue_name)
+            
+            st.success("解析完了！")
+            
+            df_disp = []
+            for item in ranked:
+                df_disp.append({
+                    "予想順": len(df_disp) + 1,
+                    "枠": item["lane"],
+                    "総合スコア": item["score"],
+                    "AI加点": item["breakdown"].get("AI加点", 0.0),
+                    "コース基礎": item["breakdown"].get("コース基礎", 0.0),
+                    "場×コース": item["breakdown"].get("場×コース", 0.0)
+                })
+            st.dataframe(pd.DataFrame(df_disp), use_container_width=True)
+            
+            st.subheader("💡 おすすめ買い目")
+            bets_safe = make_bets(ranked, "safe")
+            bets_std = make_bets(ranked, "standard")
+            bets_wide = make_bets(ranked, "wide")
+            st.write(f"**安全2点**: {', '.join(bets_safe) if bets_safe else 'なし'}")
+            st.write(f"**標準4点**: {', '.join(bets_std) if bets_std else 'なし'}")
+            st.write(f"**拡張9点**: {', '.join(bets_wide) if bets_wide else 'なし'}")
+        else:
+            st.error("出走表が取得できませんでした。")
 
-    dstr = t1_date.strftime("%Y%m%d")
-    with st.spinner("開催場を取得中..."): vlist = venues_for_date(t1_date)
-
-    if not vlist:
-        st.warning("開催場が見つかりません。")
-    else:
-        vname = st.selectbox("開催場", [n for _, n in vlist], key="t1_venue")
-        jcd   = NAME_JCD[vname]
-        rno   = st.selectbox("レース", list(range(1, 13)), format_func=lambda r: f"{r}R", key="t1_rno")
-
-        sc1, sc2 = st.columns([2, 3])
-        with sc1: t1_strategy = st.radio("戦略", ["safe", "standard", "wide"], index=1, format_func=strategy_label, horizontal=True, key="t1_strategy")
-        with sc2: t1_min_odds = st.slider("最低オッズ (0=無効)", min_value=0.0, max_value=30.0, value=0.0, step=1.0, key="t1_min_odds", help="指定オッズ未満を除外")
-
-        with st.expander("🗺️ 場の傾向を見る", expanded=False): render_venue_summary(vname)
-
-        if st.button("🎯 解析する", type="primary", use_container_width=True, key="t1_run"):
-            with st.spinner("選手データ取得中..."):
-                all_r = fetch_racelist(jcd, dstr)
-
-            racers = all_r.get(rno)
-            if not racers or len(racers) < 6:
-                st.error("選手データを取得できませんでした。")
-            else:
-                exhibit_times: List[Optional[float]] = [None] * 6
-                if t1_date <= today + timedelta(days=1):
-                    with st.spinner("展示タイム取得中..."): exhibit_times = fetch_exhibit_times(dstr, jcd, rno)
-                exhibit_ranks = assign_exhibit_ranks(exhibit_times)
-                exhibit_loaded = any(t is not None for t in exhibit_times)
-                for i, r in enumerate(racers): r.exhibit_rank = exhibit_ranks[i]
-
-                ranked = rank_all(racers, vname)
-                odds_map = fetch_odds_3t(dstr, jcd, rno) if t1_date >= today else {}
-                bets = make_bets(ranked, strategy=t1_strategy, odds_map=odds_map if odds_map else None, min_odds=t1_min_odds)
-                res = fetch_result(dstr, jcd, rno) if t1_date <= today else None
-
-                st.markdown(f"### {vname} {rno}R {venue_tendency_label(vname)}")
-                st.caption(f"戦略: **{strategy_label(t1_strategy)}**" + (f" / オッズ≥{t1_min_odds:.0f}倍" if t1_min_odds > 0 else "") + (" / オッズ取得成功" if odds_map else "") + (" / 展示適用" if exhibit_loaded else " / 展示未発表"))
-
-                if len(ranked) >= 4:
-                    m12, m23, m34 = ranked[0]["score"] - ranked[1]["score"], ranked[1]["score"] - ranked[2]["score"], ranked[2]["score"] - ranked[3]["score"]
-                    conf = "🟢 高信頼" if m12 >= 1.5 else "🟡 中信頼" if m12 >= 0.8 else "🔴 低信頼"
-                    st.caption(f"スコア差: 1-2={m12:+.2f} / 2-3={m23:+.2f} / 3-4={m34:+.2f} {conf}")
-
-                df_rows = []
-                for rk, x in enumerate(ranked, 1):
-                    r, bd = x["racer"], x["breakdown"]
-                    df_rows.append({
-                        "順位": rk, "艇": x["lane"], "名前": r.name, "級": r.cls or "-",
-                        "勝率": f"{r.win_rate:.2f}" if r.win_rate else "-", "ST": f"{r.avg_st:.2f}" if r.avg_st else "-",
-                        "M2率": f"{r.motor_2rate*100:.0f}" if r.motor_2rate else "-", "節平順": f"{r.settle_avg_rank:.1f}" if r.settle_avg_rank else "-",
-                        "節ST": f"{r.settle_st:.2f}" if r.settle_st else "-", "F": r.f_count or 0,
-                        "展示": f"{exhibit_times[x['lane']-1]:.2f}({r.exhibit_rank})" if exhibit_times[x['lane']-1] and r.exhibit_rank else "-",
-                        "基礎+場": f"{bd['コース基礎']+bd['場×コース']+bd['場×攻め']:+.2f}", "スコア": f"{x['score']:+.2f}"
-                    })
-                st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
-
-                with st.expander("📋 スコア内訳"):
-                    br_rows = []
-                    for rk, x in enumerate(ranked[:6], 1):
-                        row = {"順位": rk, "艇": x["lane"], "名前": x["racer"].name}
-                        row.update({k: f"{v:+.2f}" if isinstance(v, float) else v for k, v in x["breakdown"].items() if k not in ("合計", "総合計(AI込)")})
-                        row["合計"] = f"{x['score']:+.2f}"
-                        br_rows.append(row)
-                    st.dataframe(pd.DataFrame(br_rows), use_container_width=True, hide_index=True)
-
-                if bets:
-                    st.subheader(f"🎯 推奨買い目 ({strategy_label(t1_strategy)} / {len(bets)}点)")
-                    st.markdown(" / ".join(f"**{i+1}位** {ranked[i]['lane']}号艇({ranked[i]['racer'].name})" for i in range(min(4, len(ranked)))))
-                    if odds_map:
-                        bet_rows, total_inv, odds_values = [], len(bets) * 100, [odds_map.get(b, 0) for b in bets]
-                        for b, o in zip(bets, odds_values):
-                            bet_rows.append({"買い目": b, "オッズ": f"{o:.1f}倍" if o > 0 else "-", "的中時回収": f"¥{int(o*100):,}" if o > 0 else "-", "回収率": f"{o*100/total_inv*100:.0f}%" if o > 0 else "-"})
-                        st.dataframe(pd.DataFrame(bet_rows), use_container_width=True, hide_index=True)
-                    else:
-                        st.code("\n".join(bets))
-                        st.caption("オッズ未取得")
-                
-                if res:
-                    st.markdown("---")
-                    st.subheader("🏁 レース結果")
-                    c1r, c2r = st.columns(2)
-                    c1r.markdown(f"**着順**: {'-'.join(str(n) for n in res['finish'][:3])}")
-                    if res.get("kimarite"): c2r.markdown(f"**決まり手**: {res['kimarite']}")
-                    hit, inv_yen = res["combo"] in bets if res["combo"] else False, len(bets) * 100
-                    payout = res["payout"] if hit else 0
-                    rr, profit = (payout / inv_yen * 100) if inv_yen > 0 else 0, payout - inv_yen
-                    if res.get("combo"): st.metric("3連単 払戻", res["combo"], f"¥{res['payout']:,}")
-                    st.markdown(f"### 💰 買い目収支（{len(bets)}点=¥{inv_yen}）")
-                    ca, cb, cc = st.columns(3)
-                    ca.metric("投資", f"¥{inv_yen}"); cb.metric("回収", f"¥{payout:,}"); cc.metric("回収率", f"{rr:.0f}%", f"{profit:+,}円", delta_color="normal" if rr >= 100 else "inverse")
-                else: st.caption("🕓 結果未確定")
-
+# ----------------------------------------------------
+# タブ2: バックテスト（超・爆速版）
+# ----------------------------------------------------
 with tab2:
-    st.subheader("📊 期間バックテスト / 当日スキャン")
-    bc1, bc2 = st.columns(2)
-    with bc1: bt_s = st.date_input("開始日", value=today - timedelta(days=3), min_value=datetime(2020,1,1).date(), max_value=today, key="bt_s")
-    with bc2: bt_e = st.date_input("終了日", value=today, min_value=datetime(2020,1,1).date(), max_value=today, key="bt_e")
-
-    bt_venues = st.multiselect("対象場 (空=全場)", options=[JCD_NAME[j] for j in sorted(JCD_NAME.keys())], default=[], key="bt_venues")
-    bt_target_jcds = {NAME_JCD[v] for v in bt_venues if v in NAME_JCD} if bt_venues else None
+    st.subheader("📊 期間バックテスト（超・爆速仕様）")
     
-    if bt_target_jcds: st.caption(f"🎯 対象 {len(bt_target_jcds)} 場")
-    else: st.caption("⚡ 全場対象")
+    col1, col2 = st.columns(2)
+    with col1:
+        bt_start = st.date_input("開始日 ", value=datetime.now(JST).date() - timedelta(days=2))
+    with col2:
+        bt_end = st.date_input("終了日 ", value=datetime.now(JST).date() - timedelta(days=1))
+        
+    bt_venue_idx = st.selectbox("場を指定", options=[0] + list(JCD_NAME.keys()), format_func=lambda x: "全国（すべて）" if x==0 else JCD_NAME[x])
+    bt_strategy = st.radio("買い目戦略", options=["safe", "standard", "wide"], format_func=strategy_label, horizontal=True)
 
-    bt_strategy = st.radio("戦略", ["safe", "standard", "wide"], index=1, format_func=strategy_label, horizontal=True, key="bt_strategy")
-
-    with st.expander("🔧 品質フィルター (デフォルト推奨)", expanded=True):
-        qc1, qc2 = st.columns(2)
-        with qc1:
-            bt_skip_b2 = st.checkbox("B2の1号艇を除外", value=True, key="bt_skip_b2")
-            bt_skip_hard = st.checkbox("戸田/江戸川/平和島を除外", value=False, key="bt_skip_hard")
-        with qc2: bt_min_winrate = st.slider("1号艇勝率の下限", 0.0, 8.0, 5.0, 0.5, key="bt_min_wr")
-        bt_use_exhibit = st.checkbox("展示タイムを反映 (精度向上・処理時間増)", value=False, key="bt_use_exhibit")
-
-    st.markdown("**スコア差フィルター**")
-    mc1, mc2, mc3 = st.columns(3)
-    with mc1: min_margin_12 = st.slider("1位-2位 ≥", 0.0, 3.0, 0.8, 0.1, key="bt_margin12")
-    with mc2: min_margin_23 = st.slider("2位-3位 ≥", 0.0, 2.0, 0.0, 0.1, key="bt_margin23")
-    with mc3: min_margin_34 = st.slider("3位-4位 ≥", 0.0, 2.0, 0.0, 0.1, key="bt_margin34")
-
-    if bt_s <= bt_e:
-        n_days = (bt_e - bt_s).days + 1
-        if st.button("🔍 1号艇1位を検索", type="primary", use_container_width=True, key="bt_run"):
-            days = [bt_s + timedelta(days=i) for i in range(n_days)]
-            prog, status, matches, hard_venues = st.progress(0.0), st.empty(), [], {"戸田", "江戸川", "平和島"}
-
-            for idx, day in enumerate(days):
-                dstr_bt, is_past = day.strftime("%Y%m%d"), day < today
-                prog.progress((idx + 1) / n_days, text=f"[{idx+1}/{n_days}] {dstr_bt} 処理中{' (当日)' if not is_past else ''}...")
-
-                open_jcds = [j for j, _ in venues_for_date(day)]
-                for jcd_bt in open_jcds:
-                    venue_bt = JCD_NAME.get(jcd_bt, "")
-                    if not venue_bt or (bt_target_jcds and jcd_bt not in bt_target_jcds) or (bt_skip_hard and venue_bt in hard_venues): continue
+    if st.button("📊 バックテスト実行", type="primary", use_container_width=True):
+        days = [(bt_start + timedelta(days=i)).strftime("%Y%m%d") for i in range((bt_end - bt_start).days + 1)]
+        matches = []
+        prog = st.progress(0.0)
+        
+        # 実行する全タスクのリストアップ
+        tasks = []
+        for dstr in days:
+            jcds = boatrace_venues(dstr)
+            if bt_venue_idx != 0:
+                jcds = [bt_venue_idx] if bt_venue_idx in jcds else []
+            for j in jcds:
+                for r in range(1, 13):
+                    tasks.append((dstr, j, r))
                     
-                    status.caption(f"📡 {dstr_bt} {venue_bt} — データ取得中...")
-                    races = fetch_racelist(jcd_bt, dstr_bt)
-                    if not races: continue
+        st.write(f"全 {len(tasks)} レースを15並列で一気に解析中...")
+        
+        # 1レースを解析する分身（スレッド）の仕事
+        def analyze_race(d, j, r):
+            racers = fetch_race_detail(j, r, d)
+            if not racers: return None
+            
+            ranks, actual_result, payoff = fetch_result_and_payoff(j, r, d)
+            if not actual_result: return None # まだ結果がない
+            
+            venue_name = JCD_NAME.get(j, "不明")
+            ranked = rank_all(racers, venue_name)
+            bets = make_bets(ranked, strategy=bt_strategy)
+            
+            hit = actual_result in bets
+            top_score = ranked[0]["score"]
+            ai_score = ranked[0]["breakdown"].get("AI加点", 0.0)
+            
+            return {
+                "日付": d,
+                "場": venue_name,
+                "R": r,
+                "買い目": ", ".join(bets),
+                "点数": len(bets),
+                "結果": actual_result,
+                "的中": "🎯" if hit else "❌",
+                "払戻金": payoff, # 👈 外れても実際の配当を表示！
+                "獲得金": payoff if hit else 0, # 的中した時だけ手に入るお金
+                "スコア": top_score,
+                "AI加点": ai_score
+            }
+            
+        # ★超爆速エンジン（15人がかりで解析）
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            future_to_task = {executor.submit(analyze_race, d, j, r): (d, j, r) for d, j, r in tasks}
+            done_count = 0
+            for future in concurrent.futures.as_completed(future_to_task):
+                done_count += 1
+                prog.progress(done_count / len(tasks) if len(tasks) > 0 else 1.0)
+                res = future.result()
+                if res:
+                    matches.append(res)
+                    
+        if matches:
+            df_bt = pd.DataFrame(matches)
+            hits = df_bt[df_bt["的中"] == "🎯"]
+            
+            total_invest = df_bt["点数"].sum() * 100
+            total_return = df_bt["獲得金"].sum()
+            hit_rate = len(hits) / len(df_bt) * 100 if len(df_bt) > 0 else 0
+            ret_rate = total_return / total_invest * 100 if total_invest > 0 else 0
+            
+            st.success(f"解析完了！ 対象レース: {len(df_bt)}件 / 的中: {len(hits)}件 (的中率 {hit_rate:.1f}%)")
+            st.info(f"💰 **総投資**: {total_invest:,}円 / **総回収**: {total_return:,}円 (回収率: {ret_rate:.1f}%)")
+            
+            # 見やすくするため、表示から「点数」「獲得金」の内部列を隠す
+            disp_cols = ["日付", "場", "R", "買い目", "結果", "的中", "払戻金", "スコア", "AI加点"]
+            st.dataframe(df_bt[disp_cols], use_container_width=True)
+        else:
+            st.warning("解析できるレースがありませんでした（中止または発売前）。")
 
-                    for rno_bt, racers_bt in sorted(races.items()):
-                        if len(racers_bt) < 6: continue
-                        if bt_use_exhibit:
-                            ex_times = fetch_exhibit_times(dstr_bt, jcd_bt, rno_bt)
-                            for i, r_ in enumerate(racers_bt): r_.exhibit_rank = assign_exhibit_ranks(ex_times)[i]
-
-                        ranked_bt = rank_all(racers_bt, venue_bt)
-                        if ranked_bt[0]["lane"] != 1: continue
-
-                        ichi = racers_bt[0]
-                        if (bt_skip_b2 and ichi.cls == "B2") or (ichi.win_rate and ichi.win_rate < bt_min_winrate): continue
-
-                        margin_12, margin_23, margin_34 = ranked_bt[0]["score"] - ranked_bt[1]["score"], ranked_bt[1]["score"] - ranked_bt[2]["score"], ranked_bt[2]["score"] - ranked_bt[3]["score"]
-                        if margin_12 < min_margin_12 or margin_23 < min_margin_23 or margin_34 < min_margin_34: continue
-
-                        bets_bt, top_score, inv_bt = make_bets(ranked_bt, strategy=bt_strategy), ranked_bt[0]["score"], len(make_bets(ranked_bt, strategy=bt_strategy)) * 100
-
-                        if not is_past:
-                            matches.append({"日付": dstr_bt, "場": venue_bt, "R": rno_bt, "スコア": top_score, "差12": margin_12, "差23": margin_23, "差34": margin_34, "_bets": bets_bt, "_inv": inv_bt, "結果": "未発走", "払戻": 0, "_hit": None, "_payout": 0, "_status": "pending"})
-                            continue
-
-                        res_bt = fetch_result(dstr_bt, jcd_bt, rno_bt)
-                        if res_bt and res_bt["combo"]:
-                            combo_bt, hit_bt = res_bt["combo"], res_bt["combo"] in bets_bt
-                            payout_bt = res_bt["payout"] if hit_bt else 0
-                            status_bt = "resolved"
-                        else:
-                            combo_bt, hit_bt, payout_bt, status_bt = "取得失敗", None, 0, "unresolved"
-
-                        matches.append({"日付": dstr_bt, "場": venue_bt, "R": rno_bt, "スコア": top_score, "差12": margin_12, "差23": margin_23, "差34": margin_34, "_bets": bets_bt, "_inv": inv_bt, "結果": combo_bt, "払戻": payout_bt if hit_bt else 0, "_hit": hit_bt, "_payout": payout_bt, "_status": status_bt})
-
-            prog.empty(); status.empty()
-            st.session_state["bt_matches"] = matches
-
-        if "bt_matches" in st.session_state:
-            M = st.session_state["bt_matches"]
-            if not M: st.warning("対象期間に条件を満たすレースが見つかりませんでした。")
-            else:
-                n_resv, n_hit, inv, ret = sum(1 for m in M if m["_status"] == "resolved"), len([m for m in M if m["_hit"] is True]), sum(m["_inv"] for m in M if m["_status"] == "resolved"), sum(m["_payout"] for m in M if m["_status"] == "resolved")
-                
-                st.success(f"✅ {len(M)}件 抽出 (結果確定: {n_resv} / 未発走: {sum(1 for m in M if m['_status'] == 'pending')})")
-                ca, cb, cc, cd = st.columns(4)
-                ca.metric("対象", f"{len(M)}件")
-                cb.metric("的中", f"{n_hit}/{n_resv}", f"{round(n_hit/n_resv*100,1)}%" if n_resv else "-")
-                cc.metric("回収率", f"{round(ret/inv*100,1)}%" if n_resv else "-", f"{ret-inv:+,}円" if n_resv else None, delta_color="normal" if inv>0 and ret/inv>=1 else "inverse")
-                cd.metric("投資/回収", f"¥{inv:,} / ¥{ret:,}")
-
-                st.markdown("### 📋 レース一覧")
-                st.dataframe(pd.DataFrame([{"日付": m["日付"], "場": m["場"], "R": m["R"], "スコア": f"{m['スコア']:+.2f}", "差12": f"{m['差12']:+.2f}", "差23": f"{m['差23']:+.2f}", "差34": f"{m['差34']:+.2f}", "点数": len(m["_bets"]), "結果": m["結果"], "払戻": f"¥{m['払戻']:,}" if m["払戻"] else "-", "判定": "✅" if m["_hit"] is True else "✕" if m["_hit"] is False else "⏳" if m["_status"] == "pending" else "?"} for m in M]), use_container_width=True, hide_index=True)
-
-
+# ----------------------------------------------------
+# タブ3: AIデータ収集（超・爆速版）
+# ----------------------------------------------------
 with tab3:
-    st.subheader("🤖 AI学習用データ（CSV）作成")
-    st.caption("アプリの高速収集エンジンを使って、AIに読み込ませるための過去のレース結果（CSVファイル）を自動作成します。")
+    st.subheader("🤖 AI学習データ（CSV）超・爆速収集")
+    st.warning("⚠️ 15並列で実行します。")
     
-    ai_s = st.date_input("収集開始日", value=today - timedelta(days=3), min_value=datetime(2020,1,1).date(), max_value=today - timedelta(days=1), key="ai_s")
-    ai_e = st.date_input("収集終了日", value=today - timedelta(days=1), min_value=datetime(2020,1,1).date(), max_value=today - timedelta(days=1), key="ai_e")
+    col1, col2 = st.columns(2)
+    with col1:
+        ai_s = st.date_input("収集開始日", value=datetime.now(JST).date() - timedelta(days=2))
+    with col2:
+        ai_e = st.date_input("収集終了日", value=datetime.now(JST).date() - timedelta(days=1))
     
-    st.warning("⚠️ 注意: サーバーのタイムアウトを防ぐため、1回につき「3日〜7日分」くらいずつ収集することをおすすめします。")
-
-    if ai_s <= ai_e:
-        if st.button("🚀 学習データを収集する", type="primary", use_container_width=True):
-            n_days = (ai_e - ai_s).days + 1
-            days = [ai_s + timedelta(days=i) for i in range(n_days)]
+    if st.button("🚀 超・爆速収集を開始", type="primary", use_container_width=True):
+        days = [(ai_s + timedelta(days=i)).strftime("%Y%m%d") for i in range((ai_e - ai_s).days + 1)]
+        all_data = []
+        prog = st.progress(0.0)
+        
+        for idx, dstr in enumerate(days):
+            jcds = boatrace_venues(dstr)
+            if not jcds: continue
             
-            prog = st.progress(0.0)
-            status = st.empty()
-            all_ai_data = []
+            tasks = [(j, r, dstr) for j in jcds for r in range(1, 13)]
+            st.write(f"📅 {dstr}: 全 {len(tasks)} レースを15人体制で取得中...")
             
-            for idx, day in enumerate(days):
-                dstr_ai = day.strftime("%Y%m%d")
-                prog.progress((idx + 1) / n_days, text=f"[{idx+1}/{n_days}] {dstr_ai} のデータを収集中...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+                res_futures = {executor.submit(fetch_result_and_payoff, j, r, dstr): (j, r) for j, r, d in tasks}
+                list_futures = {executor.submit(fetch_race_detail, j, r, dstr): (j, r) for j, r, d in tasks}
                 
-                open_jcds = [j for j, _ in venues_for_date(day)]
-                for jcd_ai in open_jcds:
-                    status.caption(f"📡 {dstr_ai} 場コード{jcd_ai:02d} — 出走表を並列取得中...")
-                    races = fetch_racelist(jcd_ai, dstr_ai)
-                    
-                    if not races: continue
-                    
-                    status.caption(f"📡 {dstr_ai} 場コード{jcd_ai:02d} — 結果を取得中...")
-                    for rno_ai, racers_ai in races.items():
-                        if len(racers_ai) < 6: continue
-                        
-                        res_ai = fetch_result(dstr_ai, jcd_ai, rno_ai)
-                        if res_ai and res_ai["finish"]:
-                            winner = res_ai["finish"][0] # 1着の枠番
-                            
-                            # 1〜6号艇のデータをすべてAI用に保存
-                            for i, r in enumerate(racers_ai):
-                                lane = i + 1
-                                all_ai_data.append({
-                                    "日付": dstr_ai,
-                                    "場": jcd_ai,
-                                    "レース": rno_ai,
-                                    "枠番": lane,
-                                    "勝率": r.win_rate or 0.0,
-                                    "平均ST": r.avg_st or 0.17,
-                                    "モーター": r.motor_2rate or 0.0,
-                                    "1着かどうか": 1 if lane == winner else 0
-                                })
-            
-            prog.empty()
-            status.empty()
-            
-            if all_ai_data:
-                df_ai = pd.DataFrame(all_ai_data)
-                csv_data = df_ai.to_csv(index=False).encode('utf-8-sig')
+                results_map = {(j, r): f.result()[0] for f, (j, r) in res_futures.items()} # 着順マップだけ取る
+                lists_map = {(j, r): f.result() for f, (j, r) in list_futures.items()}
                 
-                st.success(f"✅ データ収集完了！ 合計 {len(df_ai)} 艇分（約 {len(df_ai)//6} レース分）のデータが集まりました。")
-                st.download_button(
-                    label="📥 CSVファイルをダウンロード",
-                    data=csv_data,
-                    file_name="ai_train_data.csv",
-                    mime="text/csv",
-                    type="primary",
-                    use_container_width=True
-                )
-            else:
-                st.error("データを取得できませんでした。日付を変えて再度お試しください。")
+                for (j, r), racers in lists_map.items():
+                    ranks = results_map.get((j, r), {})
+                    if racers and ranks:
+                        for i, racer in enumerate(racers):
+                            lane = i + 1
+                            all_data.append({
+                                "日付": dstr, "場": j, "レース": r, "枠番": lane,
+                                "勝率": racer.win_rate, "平均ST": racer.avg_st,
+                                "モーター": racer.motor_2rate, "着順": ranks.get(lane, "")
+                            })
+            prog.progress((idx + 1) / len(days))
+            
+        if all_data:
+            df = pd.DataFrame(all_data)
+            st.success(f"✅ 完了！ {len(df)} 艇分の全着順データを取得しました。")
+            st.download_button("📥 CSVをダウンロード", df.to_csv(index=False).encode('utf-8-sig'), "all_ranks_data.csv", "text/csv", use_container_width=True)
