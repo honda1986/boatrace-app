@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.11 全艇スコア解析アプリ（データ取得バグ完全修正＆フルデータ表示版）
+v17.12 全艇スコア解析アプリ（データ取得ロジック完全復元・堅牢版）
 """
 
 import re
@@ -13,8 +13,6 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-
-# --- AI(LightGBM)用のライブラリ ---
 import lightgbm as lgb
 import numpy as np
 
@@ -41,7 +39,7 @@ JCD_NAME = {
 }
 
 # ============================================================
-# kyoteibiyori.com 場別コース別データ
+# 場別コース別データ
 # ============================================================
 COURSE_WIN_RATE: Dict[str, List[float]] = {
     "全国":   [55.1, 14.0, 12.8, 11.1, 6.1, 1.8],
@@ -93,7 +91,6 @@ class Racer:
     motor_2rate: Optional[float] = None
     f_count: int = 0
     exhibit_rank: Optional[int] = None
-    weight: Optional[float] = None
 
 def _band(v: Optional[float], bands: List[Tuple[float, float, float]], default: float = 0.0) -> float:
     if v is None: return default
@@ -105,7 +102,7 @@ def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts: Dict[str, float] = {}
 
     # AIが枠番を評価するためコース基礎加点は廃止
-
+    
     parts["節平順"] = _band(r.settle_avg_rank, [(0.99, 1.50, 2.0), (1.50, 2.50, 1.2), (2.50, 3.50, 0.3), (3.50, 4.50, -0.5), (4.50, 6.01, -1.5)])
     
     if r.settle_st is not None and r.avg_st is not None:
@@ -185,7 +182,7 @@ def strategy_label(strategy: str) -> str:
     return {"safe": "安全2点", "standard": "標準4点", "wide": "拡張9点"}.get(strategy, strategy)
 
 # ============================================================
-# スクレイピング関数群（取得できていた頑丈な版をベースに改修）
+# スクレイピング関数群（★バグ完全修正・過去の堅牢ロジック復元版）
 # ============================================================
 def get_html(url: str) -> Optional[str]:
     try:
@@ -201,65 +198,121 @@ def boatrace_venues(dstr: str) -> List[int]:
     return sorted({int(m.group(1)) for m in re.finditer(r'jcd=(\d+)', html)})
 
 def fetch_race_detail(jcd: int, rno: int, dstr: str) -> Optional[List[Racer]]:
+    """boatrace.jp公式 racelist ページから6艇分のRacerを抽出。過去の安定取得ロジックに復元。"""
     html = get_html(f"{BOAT_URL}/racelist?rno={rno}&jcd={jcd:02d}&hd={dstr}")
     if not html: return None
     soup = BeautifulSoup(html, "html.parser")
-    target = next((tbl for tbl in soup.find_all("table") if "ボートレーサー" in tbl.get_text()), None)
-    if not target: return None
     
-    racers = []
-    lane_map = {"１":1,"２":2,"３":3,"４":4,"５":5,"６":6,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6}
-    for tb in target.find_all("tbody"):
-        tr = tb.find("tr")
-        if not tr: continue
-        cells = tr.find_all(["td", "th"])
-        if not cells or cells[0].get_text(strip=True) not in lane_map: continue
-        
-        lane = lane_map[cells[0].get_text(strip=True)]
-        text = tb.get_text(" ", strip=True)
-        
-        # F数の取得
-        m_f = re.search(r"F\s*(\d+)", text)
-        f_count = int(m_f.group(1)) if m_f else 0
-        
-        # ★復元：データが取れていた頃の頑丈な正規表現を使用
-        nums = re.findall(r"-?\d+\.\d+|\d+", text)
-        try:
-            win_rate = float(nums[1]) if len(nums)>1 else 0.0
-            avg_st = float(nums[0]) if len(nums)>0 and "." in nums[0] else 0.17
-            m2 = float(nums[8]) if len(nums)>8 else 0.0
-            motor = m2 / 100.0 if m2 > 1.0 else m2
-        except:
-            win_rate, avg_st, motor = 0.0, 0.17, 0.0
+    # 出走表テーブルを特定
+    target = None
+    for tbl in soup.find_all("table"):
+        head = tbl.get_text(" ", strip=True)
+        if all(k in head for k in ["ボートレーサー", "全国", "当地", "モーター"]):
+            target = tbl
+            break
+    if not target: return None
 
-        # ★追加：今節の着順とSTを取得して平均を計算する（エラーになりにくい安全な設計）
-        ranks = []
-        sts = []
-        for td in cells:
-            a_tag = td.find("a")
-            if a_tag and "raceresult" in a_tag.get("href", ""):
-                rank_txt = a_tag.get_text(strip=True)
-                if rank_txt in ["1","2","3","4","5","6","１","２","３","４","５","６"]:
-                    ranks.append(int(rank_txt.translate(str.maketrans('１２３４５６', '123456'))))
-            
-            parts = td.get_text(separator=" ", strip=True).split()
-            for p in parts:
-                if re.match(r"^\.\d{2}$", p):
-                    sts.append(float(p))
-                    
-        settle_avg_rank = sum(ranks)/len(ranks) if ranks else None
-        settle_st = sum(sts)/len(sts) if sts else None
-            
+    racers = []
+    rows = target.find_all("tr")
+    lane_map = {"１":1,"２":2,"３":3,"４":4,"５":5,"６":6,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6}
+
+    # 各艇の主行（選手名などが書かれている1行目）を特定
+    main_rows = []
+    seen_lanes = set()
+    for tr in rows:
+        a_test = tr.find("a", href=re.compile(r"profile\?toban=\d+"))
+        if not a_test: continue
+        cells = tr.find_all(["td", "th"])
+        if not cells: continue
+        first_text = cells[0].get_text(strip=True)
+        if first_text in lane_map and lane_map[first_text] not in seen_lanes:
+            lane = lane_map[first_text]
+            main_rows.append((lane, tr))
+            seen_lanes.add(lane)
+            if len(main_rows) >= 6: break
+
+    if len(main_rows) < 6: return None
+    main_rows.sort(key=lambda x: x[0])
+
+    # テーブル全体のtr配列上での主行インデックスを取得（これで節間成績の行位置が確実にわかる）
+    all_trs = list(target.find_all("tr"))
+    main_tr_indices = {}
+    for lane, tr in main_rows:
+        try: main_tr_indices[lane] = all_trs.index(tr)
+        except ValueError: pass
+
+    for lane, tr in main_rows:
+        full_text = tr.get_text(" ", strip=True)
+        full_text = re.sub(r"\s+", " ", full_text)
+        
+        # 選手名の取得
+        a_tag = tr.find("a", href=re.compile(r"profile\?toban=\d+"))
+        name = a_tag.get_text(strip=True).replace(" ", "").replace("　", "") if a_tag else f"選手{lane}"
+
+        # F・L数から後ろのテキストだけを切り取ることで、選手番号を拾ってしまう事故を防止
+        fl_match = re.search(r"F\s*(\d+)\s+L\s*(\d+)", full_text)
+        f_count = int(fl_match.group(1)) if fl_match else 0
+
+        avg_st = 0.17
+        win_rate = 0.0
+        motor_2rate = 0.0
+
+        if fl_match:
+            tail = full_text[fl_match.end():]
+            nums = re.findall(r"-?\d+\.\d+|\d+", tail)
+            try: avg_st = float(nums[0]) if "." in nums[0] else 0.17
+            except: pass
+            try: win_rate = float(nums[1])
+            except: pass
+            try:
+                m2v = float(nums[8])
+                motor_2rate = m2v / 100.0 if m2v > 1.0 else m2v
+            except: pass
+
+        # 今節成績集計: 主行の直後から進入コース(+1)/ST(+2)/着順(+3)の行を確実に取得
+        settle_st = None
+        settle_avg_rank = None
+        idx = main_tr_indices.get(lane)
+        if idx is not None and idx + 3 < len(all_trs):
+            st_tr = all_trs[idx + 2]
+            fn_tr = all_trs[idx + 3]
+
+            def cells_text(t): return [td.get_text(strip=True) for td in t.find_all(["td", "th"])]
+
+            st_cells = cells_text(st_tr)
+            fn_cells = cells_text(fn_tr)
+
+            # 節間STの抽出
+            st_vals = []
+            for c in st_cells:
+                if re.search(r"[FLK失]", c): continue
+                if re.fullmatch(r"\.\d+", c):
+                    try: st_vals.append(float("0" + c))
+                    except: pass
+                elif re.fullmatch(r"0\.\d+", c):
+                    try: st_vals.append(float(c))
+                    except: pass
+            if st_vals: settle_st = round(sum(st_vals) / len(st_vals), 3)
+
+            # 節間着順の抽出
+            zen_to_han = str.maketrans("１２３４５６", "123456")
+            ranks = []
+            for c in fn_cells:
+                c_norm = c.translate(zen_to_han)
+                if re.fullmatch(r"[1-6]", c_norm): ranks.append(int(c_norm))
+            if ranks: settle_avg_rank = round(sum(ranks) / len(ranks), 2)
+
         racers.append(Racer(
-            name=f"艇{lane}", 
-            win_rate=win_rate, 
-            avg_st=avg_st, 
-            motor_2rate=motor, 
-            f_count=f_count,
+            name=name,
+            win_rate=win_rate,
+            avg_st=avg_st,
+            settle_st=settle_st,
             settle_avg_rank=settle_avg_rank,
-            settle_st=settle_st
+            motor_2rate=motor_2rate,
+            f_count=f_count
         ))
-    return racers if len(racers)==6 else None
+
+    return racers
 
 @st.cache_data(ttl=3600)
 def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, str], str, int]:
@@ -308,8 +361,8 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.11 超・爆速解析", layout="wide")
-st.title("🚤 v17.11 全艇スコア解析")
+st.set_page_config(page_title="v17.12 超・爆速解析", layout="wide")
+st.title("🚤 v17.12 全艇スコア解析")
 st.caption("AI一本化 ＆ フルデータ開示 ＆ 超・爆速15並列エンジン搭載")
 
 # タブを2つに絞る
@@ -345,6 +398,7 @@ with tab1:
                 df_disp.append({
                     "予想順": len(df_disp) + 1,
                     "枠": item["lane"],
+                    "選手名": racer.name,
                     "総合スコア": item["score"],
                     
                     # --- AI関連 ---
