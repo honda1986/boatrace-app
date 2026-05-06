@@ -197,13 +197,12 @@ def _band(v: Optional[float], bands: List[Tuple[float, float, float]], default: 
 def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts: Dict[str, float] = {}
 
+    # ① 基本の有利不利（枠番）
     parts["コース基礎"] = COURSE_BASE_POINTS.get(lane, 0.0)
-    parts["級別"] = {"A1": 2.5, "A2": 1.5, "B1": 0.0, "B2": -1.5}.get(r.cls, 0.0)
-    parts["勝率"] = _band(r.win_rate, [(6.50, 99, 1.5), (5.50, 6.50, 1.0), (5.00, 5.50, 0.5), (4.00, 5.00, -0.5), (0.00, 4.00, -1.2)])
 
-    st_val = r.course5_avg_st if r.course5_avg_st is not None else r.avg_st
-    att    = 1.0 if r.course5_avg_st is not None else 0.5
-    parts["ST"] = att * _band(st_val, [(0.00, 0.14, 2.0), (0.14, 0.16, 1.3), (0.16, 0.18, 0.5), (0.18, 0.20, -0.3), (0.20, 9.99, -1.3)])
+    # ＝＝＝ AIに任せるため「級別」「勝率」「ST」「モーター」の手計算を削除！ ＝＝＝
+
+    # ② 節間の調子（今節の成績・スタート見えているか）は当日の生データとして残す
     parts["節平順"] = _band(r.settle_avg_rank, [(0.99, 1.50, 2.0), (1.50, 2.50, 1.2), (2.50, 3.50, 0.3), (3.50, 4.50, -0.5), (4.50, 6.01, -1.5)])
 
     if r.settle_st is not None and r.avg_st is not None:
@@ -216,7 +215,7 @@ def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     else:
         parts["節ST改善"] = 0.0
 
-    parts["モーター"] = _band(r.motor_2rate, [(0.45, 1.01, 1.5), (0.35, 0.45, 0.8), (0.30, 0.35, 0.3), (0.25, 0.30, -0.3), (0.00, 0.25, -1.2)])
+    # ③ 直前の気配・ペナルティ状況（展示・体重・フライング）
     exhibit_scores = {1: 1.5, 2: 0.8, 3: 0.3, 4: -0.2, 5: -0.6, 6: -1.0}
     parts["展示"] = exhibit_scores.get(r.exhibit_rank, 0.0)
 
@@ -231,12 +230,14 @@ def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     elif r.f_count >= 2: parts["F持ち"] = -3.0
     else: parts["F持ち"] = 0.0
 
+    # ④ 開催場の独自データ（水面特性）
     parts["場×コース"] = venue_course_bonus(venue, lane)
     parts["場×攻め"]   = venue_attack_bonus(venue, lane)
 
     total = round(sum(parts.values()), 2)
     parts["合計"] = total
     return parts
+
 
 # ============================================================
 # LightGBM AI予測の追加設定
