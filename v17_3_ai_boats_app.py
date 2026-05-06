@@ -607,9 +607,9 @@ with tab1:
                     })
                 st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
 
-                with st.expander("📋 スコア内訳(上位3艇)"):
+                with st.expander("📋 スコア内訳"):
                     br_rows = []
-                    for rk, x in enumerate(ranked[:3], 1):
+                    for rk, x in enumerate(ranked[:6], 1):
                         row = {"順位": rk, "艇": x["lane"], "名前": x["racer"].name}
                         row.update({k: f"{v:+.2f}" if isinstance(v, float) else v for k, v in x["breakdown"].items() if k not in ("合計", "総合計(AI込)")})
                         row["合計"] = f"{x['score']:+.2f}"
