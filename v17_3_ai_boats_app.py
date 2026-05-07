@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.16 全艇スコア解析アプリ（4つのAI搭載・全着順確率表示版）
+v17.17 全艇スコア解析アプリ（タブ1表示最適化・枠番固定版）
 """
 
 import re
@@ -130,7 +130,6 @@ def load_lgb_prob_model():
     try: return lgb.Booster(model_file='lgb_prob_model.txt')
     except: return None
 
-# ★追加：2着・3着確率用のAIを読み込む
 @st.cache_resource
 def load_lgb_prob2_model():
     try: return lgb.Booster(model_file='lgb_prob2_model.txt')
@@ -155,7 +154,6 @@ def get_lgb_features(r: Racer, lane: int, venue: str) -> list:
 def rank_all(racers: List[Racer], venue: str) -> Tuple[List[Dict], Optional[float]]:
     out = []
     
-    # 4つのAIの脳みそをすべて呼び出す
     lgb_model = load_lgb_model()
     prob_model = load_lgb_prob_model()
     prob2_model = load_lgb_prob2_model()
@@ -168,13 +166,11 @@ def rank_all(racers: List[Racer], venue: str) -> Tuple[List[Dict], Optional[floa
         
         ai_score = 0.0
         
-        # ① スコアAIによる総合力計算
         if lgb_model:
             ai_pred = lgb_model.predict([features])[0]
             ai_score = round(ai_pred * 10, 2)
             bd["AI加点"] = ai_score 
             
-        # ② 各着順の確率AIによる計算（%で保存）
         if prob_model:  bd["1着率"] = round(prob_model.predict([features])[0] * 100, 1)
         if prob2_model: bd["2着率"] = round(prob2_model.predict([features])[0] * 100, 1)
         if prob3_model: bd["3着率"] = round(prob3_model.predict([features])[0] * 100, 1)
@@ -185,7 +181,6 @@ def rank_all(racers: List[Racer], venue: str) -> Tuple[List[Dict], Optional[floa
         
     out.sort(key=lambda x: x["score"], reverse=True)
     
-    # 1号艇の1着確率だけ特別に抽出して返す（画面トップ表示用）
     lane1_prob = next((x["breakdown"].get("1着率") for x in out if x["lane"] == 1), None)
         
     return out, lane1_prob
@@ -389,8 +384,8 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.16 超・爆速解析", layout="wide")
-st.title("🚤 v17.16 全艇スコア解析")
+st.set_page_config(page_title="v17.17 超・爆速解析", layout="wide")
+st.title("🚤 v17.17 全艇スコア解析")
 st.caption("クアッドAI搭載（スコア＆1・2・3着確率） ＆ 超・爆速エンジン")
 
 tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 バックテスト"])
@@ -427,13 +422,11 @@ with tab1:
                 racer = item["racer"]
                 bd = item["breakdown"]
                 
+                # ★修正点：予想順と選手名を消し、枠を先頭に。
                 df_disp.append({
-                    "予想順": len(df_disp) + 1,
                     "枠": item["lane"],
-                    "選手名": racer.name,
                     "総合スコア": item["score"],
                     
-                    # ★各艇の確率をすべて表示！
                     "1着率(%)": bd.get("1着率", "-"),
                     "2着率(%)": bd.get("2着率", "-"),
                     "3着率(%)": bd.get("3着率", "-"),
@@ -454,7 +447,9 @@ with tab1:
                     "場×攻め(点)": bd.get("場×攻め", 0.0)
                 })
             
-            st.dataframe(pd.DataFrame(df_disp), use_container_width=True)
+            # ★修正点：「枠」をインデックス（目次データ）に設定することで、左端の空欄を消し、スクロール時にも枠を固定
+            df_out = pd.DataFrame(df_disp).set_index("枠")
+            st.dataframe(df_out, use_container_width=True)
             
             st.subheader("💡 おすすめ買い目")
             bets_safe = make_bets(ranked, "safe")
