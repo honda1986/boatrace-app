@@ -126,8 +126,17 @@ def load_lgb_model():
     try: return lgb.Booster(model_file='lgb_model.txt')
     except: return None
 
-def get_lgb_features(r: Racer, lane: int) -> list:
-    return [float(lane), float(r.win_rate or 0.0), float(r.avg_st or 0.17), float(r.motor_2rate or 0.0)]
+# ★修正：場（venue）を受け取り、1〜24の数値に変換してAIに渡すように変更
+def get_lgb_features(r: Racer, lane: int, venue: str) -> list:
+    NAME_TO_JCD = {
+        "桐生":1, "戸田":2, "江戸川":3, "平和島":4, "多摩川":5, "浜名湖":6,
+        "蒲郡":7, "常滑":8, "津":9, "三国":10, "びわこ":11, "住之江":12,
+        "尼崎":13, "鳴門":14, "丸亀":15, "児島":16, "宮島":17, "徳山":18,
+        "下関":19, "若松":20, "芦屋":21, "福岡":22, "唐津":23, "大村":24
+    }
+    jcd = NAME_TO_JCD.get(venue, 1) # 場名から番号を取得
+    # AIに教えたのと同じ順番「場, 枠, 勝率, ST, モーター」で渡す
+    return [float(jcd), float(lane), float(r.win_rate or 0.0), float(r.avg_st or 0.17), float(r.motor_2rate or 0.0)]
 
 def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
     out = []
@@ -137,7 +146,8 @@ def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
         bd = score_boat(r, venue, lane)
         ai_score = 0.0
         if lgb_model:
-            ai_pred = lgb_model.predict([get_lgb_features(r, lane)])[0]
+            # ★修正：get_lgb_featuresに「venue（場名）」を渡すように変更
+            ai_pred = lgb_model.predict([get_lgb_features(r, lane, venue)])[0]
             ai_score = round(ai_pred * 10, 2)
             bd["AI加点"] = ai_score 
             
@@ -146,6 +156,9 @@ def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
         out.append({"lane": lane, "racer": r, "score": final_score, "breakdown": bd})
     out.sort(key=lambda x: x["score"], reverse=True)
     return out
+
+
+
 
 def make_bets(ranked: List[Dict], strategy: str = "standard") -> List[str]:
     if len(ranked) < 4: return []
