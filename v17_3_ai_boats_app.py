@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.15 全艇スコア解析アプリ（1号艇1着確率・ダブルAI搭載版）
+v17.16 全艇スコア解析アプリ（4つのAI搭載・全着順確率表示版）
 """
 
 import re
@@ -125,11 +125,22 @@ def load_lgb_model():
     try: return lgb.Booster(model_file='lgb_model.txt')
     except: return None
 
-# ★追加：確率予測用のAIを読み込む
 @st.cache_resource
 def load_lgb_prob_model():
     try: return lgb.Booster(model_file='lgb_prob_model.txt')
     except: return None
+
+# ★追加：2着・3着確率用のAIを読み込む
+@st.cache_resource
+def load_lgb_prob2_model():
+    try: return lgb.Booster(model_file='lgb_prob2_model.txt')
+    except: return None
+
+@st.cache_resource
+def load_lgb_prob3_model():
+    try: return lgb.Booster(model_file='lgb_prob3_model.txt')
+    except: return None
+
 
 def get_lgb_features(r: Racer, lane: int, venue: str) -> list:
     NAME_TO_JCD = {
@@ -143,30 +154,39 @@ def get_lgb_features(r: Racer, lane: int, venue: str) -> list:
 
 def rank_all(racers: List[Racer], venue: str) -> Tuple[List[Dict], Optional[float]]:
     out = []
+    
+    # 4つのAIの脳みそをすべて呼び出す
     lgb_model = load_lgb_model()
+    prob_model = load_lgb_prob_model()
+    prob2_model = load_lgb_prob2_model()
+    prob3_model = load_lgb_prob3_model()
     
     for i, r in enumerate(racers):
         lane = i + 1
         bd = score_boat(r, venue, lane)
+        features = get_lgb_features(r, lane, venue)
+        
         ai_score = 0.0
+        
+        # ① スコアAIによる総合力計算
         if lgb_model:
-            ai_pred = lgb_model.predict([get_lgb_features(r, lane, venue)])[0]
+            ai_pred = lgb_model.predict([features])[0]
             ai_score = round(ai_pred * 10, 2)
             bd["AI加点"] = ai_score 
             
+        # ② 各着順の確率AIによる計算（%で保存）
+        if prob_model:  bd["1着率"] = round(prob_model.predict([features])[0] * 100, 1)
+        if prob2_model: bd["2着率"] = round(prob2_model.predict([features])[0] * 100, 1)
+        if prob3_model: bd["3着率"] = round(prob3_model.predict([features])[0] * 100, 1)
+
         final_score = round(bd["合計"] + ai_score, 2)
         bd["総合計(AI込)"] = final_score
         out.append({"lane": lane, "racer": r, "score": final_score, "breakdown": bd})
         
     out.sort(key=lambda x: x["score"], reverse=True)
     
-    # ★追加：1号艇の1着確率を専用AIで計算
-    lane1_prob = None
-    prob_model = load_lgb_prob_model()
-    if prob_model and len(racers) >= 1:
-        # racers[0]は必ず1号艇のデータ
-        prob_pred = prob_model.predict([get_lgb_features(racers[0], 1, venue)])[0]
-        lane1_prob = round(prob_pred * 100, 1) # %表記に変換
+    # 1号艇の1着確率だけ特別に抽出して返す（画面トップ表示用）
+    lane1_prob = next((x["breakdown"].get("1着率") for x in out if x["lane"] == 1), None)
         
     return out, lane1_prob
 
@@ -369,9 +389,9 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.15 超・爆速解析", layout="wide")
-st.title("🚤 v17.15 全艇スコア解析")
-st.caption("ダブルAI搭載（スコア＆1着確率） ＆ 超・爆速エンジン")
+st.set_page_config(page_title="v17.16 超・爆速解析", layout="wide")
+st.title("🚤 v17.16 全艇スコア解析")
+st.caption("クアッドAI搭載（スコア＆1・2・3着確率） ＆ 超・爆速エンジン")
 
 tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 バックテスト"])
 
@@ -397,7 +417,6 @@ with tab1:
             
             st.success("解析完了！")
             
-            # ★確率をデカデカと表示！
             if lane1_prob is not None:
                 st.markdown(f"### 🎯 1号艇の逃げ切り確率: **<span style='color:red;'>{lane1_prob}%</span>**", unsafe_allow_html=True)
             else:
@@ -413,6 +432,11 @@ with tab1:
                     "枠": item["lane"],
                     "選手名": racer.name,
                     "総合スコア": item["score"],
+                    
+                    # ★各艇の確率をすべて表示！
+                    "1着率(%)": bd.get("1着率", "-"),
+                    "2着率(%)": bd.get("2着率", "-"),
+                    "3着率(%)": bd.get("3着率", "-"),
                     
                     "AI加点": bd.get("AI加点", 0.0),
                     
@@ -500,7 +524,7 @@ with tab2:
                 "獲得金": payoff if hit else 0, 
                 "スコア": top_score,
                 "AI加点": ai_score,
-                "1枠1着率": f"{lane1_prob}%" if lane1_prob is not None else "-" # バックテストにも確率を表示
+                "1枠1着率": f"{lane1_prob}%" if lane1_prob is not None else "-" 
             }
             
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
