@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.13 全艇スコア解析アプリ（節間成績の計算式変更版）
+v17.15 全艇スコア解析アプリ（1号艇1着確率・ダブルAI搭載版）
 """
 
 import re
@@ -95,15 +95,14 @@ class Racer:
 def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
     parts: Dict[str, float] = {}
 
-    # ★変更点1: 節平順（点）＝ 3.5 ÷ 節間平均順位
     if r.settle_avg_rank and r.settle_avg_rank > 0:
         parts["節平順"] = round(3.5 / r.settle_avg_rank, 2)
     else:
         parts["節平順"] = 0.0
 
-    # ★変更点2: ST改善（点）＝ 0.2 ÷ 節平均ST
     if r.settle_st and r.settle_st > 0:
-        parts["節ST改善"] = round(0.2 / r.settle_st, 2)
+        raw_st_score = round(0.2 / r.settle_st, 2)
+        parts["節ST改善"] = min(raw_st_score, 2.0)
     else:
         parts["節ST改善"] = 0.0
     
@@ -126,7 +125,12 @@ def load_lgb_model():
     try: return lgb.Booster(model_file='lgb_model.txt')
     except: return None
 
-# ★修正：場（venue）を受け取り、1〜24の数値に変換してAIに渡すように変更
+# ★追加：確率予測用のAIを読み込む
+@st.cache_resource
+def load_lgb_prob_model():
+    try: return lgb.Booster(model_file='lgb_prob_model.txt')
+    except: return None
+
 def get_lgb_features(r: Racer, lane: int, venue: str) -> list:
     NAME_TO_JCD = {
         "桐生":1, "戸田":2, "江戸川":3, "平和島":4, "多摩川":5, "浜名湖":6,
@@ -134,19 +138,18 @@ def get_lgb_features(r: Racer, lane: int, venue: str) -> list:
         "尼崎":13, "鳴門":14, "丸亀":15, "児島":16, "宮島":17, "徳山":18,
         "下関":19, "若松":20, "芦屋":21, "福岡":22, "唐津":23, "大村":24
     }
-    jcd = NAME_TO_JCD.get(venue, 1) # 場名から番号を取得
-    # AIに教えたのと同じ順番「場, 枠, 勝率, ST, モーター」で渡す
+    jcd = NAME_TO_JCD.get(venue, 1)
     return [float(jcd), float(lane), float(r.win_rate or 0.0), float(r.avg_st or 0.17), float(r.motor_2rate or 0.0)]
 
-def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
+def rank_all(racers: List[Racer], venue: str) -> Tuple[List[Dict], Optional[float]]:
     out = []
     lgb_model = load_lgb_model()
+    
     for i, r in enumerate(racers):
         lane = i + 1
         bd = score_boat(r, venue, lane)
         ai_score = 0.0
         if lgb_model:
-            # ★修正：get_lgb_featuresに「venue（場名）」を渡すように変更
             ai_pred = lgb_model.predict([get_lgb_features(r, lane, venue)])[0]
             ai_score = round(ai_pred * 10, 2)
             bd["AI加点"] = ai_score 
@@ -154,11 +157,18 @@ def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
         final_score = round(bd["合計"] + ai_score, 2)
         bd["総合計(AI込)"] = final_score
         out.append({"lane": lane, "racer": r, "score": final_score, "breakdown": bd})
+        
     out.sort(key=lambda x: x["score"], reverse=True)
-    return out
-
-
-
+    
+    # ★追加：1号艇の1着確率を専用AIで計算
+    lane1_prob = None
+    prob_model = load_lgb_prob_model()
+    if prob_model and len(racers) >= 1:
+        # racers[0]は必ず1号艇のデータ
+        prob_pred = prob_model.predict([get_lgb_features(racers[0], 1, venue)])[0]
+        lane1_prob = round(prob_pred * 100, 1) # %表記に変換
+        
+    return out, lane1_prob
 
 def make_bets(ranked: List[Dict], strategy: str = "standard") -> List[str]:
     if len(ranked) < 4: return []
@@ -359,9 +369,9 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.13 超・爆速解析", layout="wide")
-st.title("🚤 v17.13 全艇スコア解析")
-st.caption("AI一本化 ＆ フルデータ開示 ＆ 超・爆速15並列エンジン搭載")
+st.set_page_config(page_title="v17.15 超・爆速解析", layout="wide")
+st.title("🚤 v17.15 全艇スコア解析")
+st.caption("ダブルAI搭載（スコア＆1着確率） ＆ 超・爆速エンジン")
 
 tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 バックテスト"])
 
@@ -383,10 +393,16 @@ with tab1:
         racers = fetch_race_detail(v_idx, r_idx, dstr)
         if racers:
             venue_name = JCD_NAME[v_idx]
-            ranked = rank_all(racers, venue_name)
+            ranked, lane1_prob = rank_all(racers, venue_name)
             
             st.success("解析完了！")
             
+            # ★確率をデカデカと表示！
+            if lane1_prob is not None:
+                st.markdown(f"### 🎯 1号艇の逃げ切り確率: **<span style='color:red;'>{lane1_prob}%</span>**", unsafe_allow_html=True)
+            else:
+                st.markdown("### 🎯 1号艇の逃げ切り確率: (確率用AI未導入)")
+                
             df_disp = []
             for item in ranked:
                 racer = item["racer"]
@@ -465,7 +481,7 @@ with tab2:
             if not actual_result: return None 
             
             venue_name = JCD_NAME.get(j, "不明")
-            ranked = rank_all(racers, venue_name)
+            ranked, lane1_prob = rank_all(racers, venue_name)
             bets = make_bets(ranked, strategy=bt_strategy)
             
             hit = actual_result in bets
@@ -483,7 +499,8 @@ with tab2:
                 "払戻金": payoff, 
                 "獲得金": payoff if hit else 0, 
                 "スコア": top_score,
-                "AI加点": ai_score
+                "AI加点": ai_score,
+                "1枠1着率": f"{lane1_prob}%" if lane1_prob is not None else "-" # バックテストにも確率を表示
             }
             
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
@@ -508,7 +525,7 @@ with tab2:
             st.success(f"解析完了！ 対象レース: {len(df_bt)}件 / 的中: {len(hits)}件 (的中率 {hit_rate:.1f}%)")
             st.info(f"💰 **総投資**: {total_invest:,}円 / **総回収**: {total_return:,}円 (回収率: {ret_rate:.1f}%)")
             
-            disp_cols = ["日付", "場", "R", "買い目", "結果", "的中", "払戻金", "スコア", "AI加点"]
+            disp_cols = ["日付", "場", "R", "買い目", "結果", "的中", "払戻金", "スコア", "AI加点", "1枠1着率"]
             st.dataframe(df_bt[disp_cols], use_container_width=True)
         else:
             st.warning("解析できるレースがありませんでした（中止または発売前）。")
