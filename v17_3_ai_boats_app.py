@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v17.17 全艇スコア解析アプリ（タブ1表示最適化・枠番固定版）
+v17.18 全艇スコア解析アプリ（着順確率に基づく買い目生成版）
 """
 
 import re
@@ -185,30 +185,53 @@ def rank_all(racers: List[Racer], venue: str) -> Tuple[List[Dict], Optional[floa
         
     return out, lane1_prob
 
+# ★ここが大改修ポイント：各確率に基づいて買い目を生成
 def make_bets(ranked: List[Dict], strategy: str = "standard") -> List[str]:
     if len(ranked) < 4: return []
-    lanes = [x["lane"] for x in ranked]
-    l1, l2, l3, l4 = lanes[0], lanes[1], lanes[2], lanes[3]
-    l5 = lanes[4] if len(lanes) >= 5 else l4
     
+    # 確率データがない場合はスコアで代用する安全装置
+    def get_rate(x, key):
+        val = x["breakdown"].get(key, "-")
+        return float(val) if val != "-" else x["score"]
+
+    # 1着率、2着率、3着率それぞれが高い順に枠番を並び替える
+    lanes_by_1 = [x["lane"] for x in sorted(ranked, key=lambda x: get_rate(x, "1着率"), reverse=True)]
+    lanes_by_2 = [x["lane"] for x in sorted(ranked, key=lambda x: get_rate(x, "2着率"), reverse=True)]
+    lanes_by_3 = [x["lane"] for x in sorted(ranked, key=lambda x: get_rate(x, "3着率"), reverse=True)]
+
+    l1 = lanes_by_1[0] # 頭（1着）は「1着率」が一番高い艇で固定
+    
+    # 2着、3着の候補リストから、1着で選んだ艇を除外
+    c2 = [l for l in lanes_by_2 if l != l1]
+    c3 = [l for l in lanes_by_3 if l != l1]
+    
+    raw = []
     if strategy == "safe": 
-        return [f"{l1}-{l2}-{l3}", f"{l1}-{l3}-{l2}"]
+        # 安全2点：2着率上位2艇それぞれに、3着率上位1艇を組み合わせる
+        for s in c2[:2]:
+            t_cands = [t for t in c3 if t != s]
+            if t_cands:
+                raw.append(f"{l1}-{s}-{t_cands[0]}")
     elif strategy == "wide": 
-        raw = []
-        for s in (l2, l3, l4):
-            for t in (l2, l3, l4, l5):
-                if t != s and t != l1 and s != l1:
-                    c = f"{l1}-{s}-{t}"
-                    if c not in raw: raw.append(c)
-        return raw
+        # 拡張9点：2着率上位3艇それぞれに、3着率上位3艇を組み合わせる
+        for s in c2[:3]:
+            t_cands = [t for t in c3 if t != s][:3]
+            for t in t_cands:
+                raw.append(f"{l1}-{s}-{t}")
     else:
-        raw = []
-        for s in (l2, l3):
-            for t in (l2, l3, l4):
-                if t != s and t != l1 and s != l1:
-                    c = f"{l1}-{s}-{t}"
-                    if c not in raw: raw.append(c)
-        return raw
+        # 標準4点：2着率上位2艇それぞれに、3着率上位2艇を組み合わせる
+        for s in c2[:2]:
+            t_cands = [t for t in c3 if t != s][:2]
+            for t in t_cands:
+                raw.append(f"{l1}-{s}-{t}")
+
+    # 重複を排除して返す
+    unique_bets = []
+    for b in raw:
+        if b not in unique_bets:
+            unique_bets.append(b)
+            
+    return unique_bets
 
 def strategy_label(strategy: str) -> str:
     return {"safe": "安全2点", "standard": "標準4点", "wide": "拡張9点"}.get(strategy, strategy)
@@ -384,8 +407,8 @@ def fetch_result_and_payoff(jcd: int, rno: int, dstr: str) -> Tuple[Dict[int, st
 # ============================================================
 # メインUI
 # ============================================================
-st.set_page_config(page_title="v17.17 超・爆速解析", layout="wide")
-st.title("🚤 v17.17 全艇スコア解析")
+st.set_page_config(page_title="v17.18 超・爆速解析", layout="wide")
+st.title("🚤 v17.18 全艇スコア解析")
 st.caption("クアッドAI搭載（スコア＆1・2・3着確率） ＆ 超・爆速エンジン")
 
 tab1, tab2 = st.tabs(["🔍 1レース解析", "📊 バックテスト"])
@@ -422,7 +445,6 @@ with tab1:
                 racer = item["racer"]
                 bd = item["breakdown"]
                 
-                # ★修正点：予想順と選手名を消し、枠を先頭に。
                 df_disp.append({
                     "枠": item["lane"],
                     "総合スコア": item["score"],
@@ -447,7 +469,6 @@ with tab1:
                     "場×攻め(点)": bd.get("場×攻め", 0.0)
                 })
             
-            # ★修正点：「枠」をインデックス（目次データ）に設定することで、左端の空欄を消し、スクロール時にも枠を固定
             df_out = pd.DataFrame(df_disp).set_index("枠")
             st.dataframe(df_out, use_container_width=True)
             
